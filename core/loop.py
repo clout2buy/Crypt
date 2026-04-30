@@ -1,10 +1,11 @@
 ﻿"""Agent loop: stream, dispatch tools, repeat."""
 from __future__ import annotations
 
+import time
+
 from . import runtime, ui
 from .api import Provider, TextDelta, ThinkingDelta, TurnEnd
 from tools import REGISTRY, dispatch
-from tools.todos import get_todos
 
 
 _BASE_SYSTEM = """You are crypt, a coding assistant in a minimal terminal harness.
@@ -39,9 +40,7 @@ def run(provider: Provider, show_thinking: bool = True, cwd: str = ".") -> str |
 
     while True:
         REGISTRY.before_prompt()
-
-        status = ui.todos_status(get_todos())
-        user_text = ui.user_prompt(status=status, yolo=runtime.yolo())
+        user_text = ui.user_prompt(yolo=runtime.yolo())
         if not user_text:
             continue
         if user_text in ("/quit", "/exit", "exit", "quit"):
@@ -104,50 +103,47 @@ def _run_until_done(
     is_subagent: bool = False,
 ) -> tuple[int, int]:
     tools = REGISTRY.schemas(for_subagent=is_subagent)
+    loader = ui.Loader(base_tokens=current_tokens)
+    loader.start()
+    try:
+        for _ in range(max_turns):
+            _ensure_tool_result_pairing(messages)
+            end = _stream_with_retry(provider, messages, tools, loader)
+            messages.append(end.message)
 
-    for _ in range(max_turns):
-        _ensure_tool_result_pairing(messages)
-        loader = ui.Loader(base_tokens=current_tokens)
-        loader.start()
-
-        try:
-            end = _stream_one_turn(provider, messages, tools, loader)
-        except Exception:
-            if loader.running:
-                loader.stop()
-            raise
-
-        messages.append(end.message)
-
-        if end.usage:
-            turn = (
-                end.usage.get("input_tokens", 0)
-                + end.usage.get("output_tokens", 0)
-            )
-            current_tokens = turn
-            session_tokens += turn
-
-        if not _has_tool_use(end.message):
-            if end.stop_reason == "max_tokens":
-                ui.info("response truncated at max_tokens - bump --max-tokens or rephrase")
-            if not is_subagent:
-                window = getattr(provider, "context_window", 200_000)
-                ctx_pct = min(99, int(current_tokens / window * 100))
-                ui.footer(
-                    provider.model, ctx_pct,
-                    current_tokens, session_tokens,
-                    runtime.cwd(),
-                    yolo=runtime.yolo(),
+            if end.usage:
+                turn = (
+                    end.usage.get("input_tokens", 0)
+                    + end.usage.get("output_tokens", 0)
                 )
-            return current_tokens, session_tokens
+                current_tokens = turn
+                session_tokens += turn
 
-        _dispatch_tool_uses(end.message, messages)
+            if not _has_tool_use(end.message):
+                if end.stop_reason == "max_tokens":
+                    ui.info("response truncated at max_tokens - bump --max-tokens or rephrase")
+                loader.stop()
+                if not is_subagent:
+                    window = getattr(provider, "context_window", 200_000)
+                    ctx_pct = min(99, int(current_tokens / window * 100))
+                    ui.footer(
+                        provider.model, ctx_pct,
+                        current_tokens, session_tokens,
+                        runtime.cwd(),
+                        yolo=runtime.yolo(),
+                    )
+                return current_tokens, session_tokens
+
+            _dispatch_tool_uses(end.message, messages)
+            _ensure_tool_result_pairing(messages)
+
+        _stub_dangling_tools(messages)
         _ensure_tool_result_pairing(messages)
-
-    _stub_dangling_tools(messages)
-    _ensure_tool_result_pairing(messages)
-    ui.error(f"max turns ({max_turns}) exceeded")
-    return current_tokens, session_tokens
+        ui.error(f"max turns ({max_turns}) exceeded")
+        return current_tokens, session_tokens
+    finally:
+        if loader.running:
+            loader.stop()
 
 
 def _run_subagent(provider: Provider, prompt: str) -> str:
@@ -168,9 +164,6 @@ def _stream_one_turn(
 
     try:
         for event in provider.stream_turn(messages, tools, SYSTEM_PROMPT):
-            if loader.running:
-                loader.stop()
-
             if isinstance(event, ThinkingDelta):
                 if not show_thinking:
                     continue
@@ -196,8 +189,6 @@ def _stream_one_turn(
         raise RuntimeError("provider stream ended without a TurnEnd event")
 
     except BaseException:
-        if loader.running:
-            loader.stop()
         if thinking_open:
             ui.thinking_end()
         if text_open:
@@ -222,6 +213,55 @@ def _dispatch_tool_uses(assistant_msg: dict, messages: list[dict]) -> None:
     if not results:
         raise RuntimeError("assistant stopped for tool_use without tool_use blocks")
     messages.append({"role": "user", "content": results})
+
+
+_TRANSIENT_NAMES = {
+    "RateLimitError",
+    "InternalServerError",
+    "APIConnectionError",
+    "APITimeoutError",
+    "ServiceUnavailableError",
+    "OverloadedError",
+    "ResponseError",
+}
+_TRANSIENT_HINTS = (
+    "overloaded", "rate limit", "rate_limit",
+    "503", "502", "504",
+    "timeout", "timed out", "connection", "temporarily",
+)
+
+
+def _is_transient(exc: Exception) -> bool:
+    if type(exc).__name__ in _TRANSIENT_NAMES:
+        return True
+    msg = str(exc).lower()
+    return any(h in msg for h in _TRANSIENT_HINTS)
+
+
+def _stream_with_retry(
+    provider: Provider,
+    messages: list[dict],
+    tools: list[dict],
+    loader: ui.Loader,
+    delays: tuple[int, ...] = (2, 5, 12),
+) -> TurnEnd:
+    """Run one turn; on transient failure, back off and retry. The live
+    region stays running across retries — the wait just shows above it."""
+    last_err: Exception | None = None
+    for attempt in range(len(delays) + 1):
+        try:
+            return _stream_one_turn(provider, messages, tools, loader)
+        except Exception as e:
+            last_err = e
+            if not _is_transient(e) or attempt == len(delays):
+                raise
+            wait = delays[attempt]
+            ui.info(
+                f"transient {type(e).__name__} - retry "
+                f"{attempt + 1}/{len(delays)} in {wait}s"
+            )
+            time.sleep(wait)
+    raise last_err  # pragma: no cover (unreachable)
 
 
 def _has_tool_use(msg: dict) -> bool:
@@ -339,11 +379,19 @@ def _show_status(provider: Provider, current_tokens: int, session_tokens: int) -
 
 
 def _format_error(exc: Exception) -> str:
-    if type(exc).__name__ == "RateLimitError":
+    name = type(exc).__name__
+    if name == "RateLimitError":
         return (
-            f"{type(exc).__name__}: {exc}\n"
+            f"{name}: {exc}\n"
             "   Anthropic rate limits count the requested output cap before generation. "
             "Try --max-tokens 2048, --no-thinking, or wait for the retry window."
         )
-    return f"{type(exc).__name__}: {exc}"
+    if _is_transient(exc):
+        return (
+            f"{name}: {exc}\n"
+            "   Provider is overloaded or unreachable. Tried with backoff. "
+            "Wait a minute or try a different model (/login to swap account, or "
+            "restart with --provider ollama --model qwen3-coder:480b-cloud)."
+        )
+    return f"{name}: {exc}"
 

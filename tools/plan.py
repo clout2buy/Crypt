@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core import ui
+from core import runtime, ui
 
 from .types import Tool
 
@@ -63,13 +63,13 @@ def run(args: dict) -> str:
         return "present_plan: plan is required"
 
     ui.plan_panel(title, plan)
+    if runtime.yolo():
+        ui.info("yolo on - auto-approving plan")
+        return "approved. proceed with execution."
     if ui.ask("approve this plan and proceed?"):
         return "approved. proceed with execution."
 
-    try:
-        feedback = input(f"       {ui.GOLD}>{ui.RST} feedback (empty to abort): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        feedback = ""
+    feedback = ui.feedback_prompt()
     if not feedback:
         return "rejected. no feedback provided. stop or ask one focused question."
     return f"rejected. user feedback: {feedback}"

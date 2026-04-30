@@ -1,93 +1,97 @@
-"""Terminal UI for crypt — TRANSMISSION style.
+"""Terminal UI for crypt — TRANSMISSION style, Rich-powered.
 
-Truecolor (24-bit) ANSI; falls back to whatever the terminal renders. Public
-API kept stable so the rest of the harness doesn't care about the redesign.
+Architecture:
+- One Rich `Console` shared across the module.
+- A live region (Rich `Live`) pinned at the bottom while the model works.
+  It renders the todos panel + animated status line.
+- All other output (tool calls, assistant text, etc.) goes through
+  `console.print`, which scrolls above the live region naturally.
+- A small typewriter pipe smooths chunked streaming into a steady
+  character flow so the model's text doesn't appear in jarring bursts.
+
+Public API stays stable: welcome, footer, user_prompt, info, error, ask,
+ask_choice, splash_choice, todos_panel, todos_status, plan_panel,
+status_panel, workspace_changed, subagent_start, subagent_end,
+assistant_*, thinking_*, tool_call, tool_result, clear_screen,
+read_multiline, feedback_prompt, Loader.
 """
 from __future__ import annotations
 
 import os
-import re
-import shutil
 import sys
 import threading
 import time
+from collections import deque
+from datetime import datetime
+from typing import Iterable
+
+from rich.console import Console, Group, RenderableType
+from rich.live import Live
+from rich.text import Text
 
 
 if os.name == "nt":
     os.system("")
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 
-RST = "\033[0m"
-B = "\033[1m"
-DIM = "\033[2m"
-IT = "\033[3m"
-CLR = "\033[K"
+# ─── palette ─────────────────────────────────────────────────────────────
+INK = "rgb(200,230,212)"
+MUTED = "rgb(106,138,120)"
+FAINT = "rgb(58,84,72)"
+EDGE = "rgb(26,40,32)"
+ACCENT = "rgb(38,255,156)"
+ALT = "rgb(84,224,255)"
+WARN = "rgb(255,184,64)"
+ERR = "rgb(255,64,96)"
+HOT = "rgb(255,126,192)"
 
+ACCENT_BG = "on rgb(16,74,48)"
+WARN_BG = "on rgb(74,54,16)"
+ERR_BG = "on rgb(74,20,32)"
+INPUT_BG = "on rgb(28,40,32)"
 
-def _rgb(r: int, g: int, b: int) -> str:
-    return f"\033[38;2;{r};{g};{b}m"
-
-
-def _bg(r: int, g: int, b: int) -> str:
-    return f"\033[48;2;{r};{g};{b}m"
-
-
-# Palette — TRANSMISSION (greenscale + amber + red)
-INK = _rgb(0xc8, 0xe6, 0xd4)
-MUTED = _rgb(0x6a, 0x8a, 0x78)
-FAINT = _rgb(0x3a, 0x54, 0x48)
-EDGE = _rgb(0x1a, 0x28, 0x20)
-ACCENT = _rgb(0x26, 0xff, 0x9c)
-ALT = _rgb(0x54, 0xe0, 0xff)
-WARN = _rgb(0xff, 0xb8, 0x40)
-ERR = _rgb(0xff, 0x40, 0x60)
-HOT = _rgb(0xff, 0x7e, 0xc0)
-
-# Dim backgrounds for badges
-ACCENT_BG = _bg(0x10, 0x4a, 0x30)
-WARN_BG = _bg(0x4a, 0x36, 0x10)
-ERR_BG = _bg(0x4a, 0x14, 0x20)
-
-# Backward-compat aliases (other modules import these)
-GREEN = ACCENT
-GREEN_BRT = ACCENT
-GREEN_DARK = MUTED
-CYAN = ALT
+# Backward-compat constants used by tools/plan.py and similar.
+RST = ""  # legacy raw-ANSI marker; safe no-op now
 GOLD = WARN
-RED = ERR
-RED_SOFT = _rgb(0xb4, 0x32, 0x4c)
 
 
-_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+# ─── console singleton ──────────────────────────────────────────────────
+console = Console(
+    highlight=False,
+    soft_wrap=False,
+    force_terminal=True,
+    legacy_windows=False,
+)
+
+
+# ─── module state ───────────────────────────────────────────────────────
+_state = {
+    "live": None,           # active Live instance (or None)
+    "loader_start": 0.0,    # monotonic clock when current turn started
+    "loader_tokens": 0,     # base token count for the running loader
+    "todos": [],            # current todo list (mirrored from todos tool)
+    "pipe": None,           # typewriter pipe (when streaming text/thinking)
+}
+
 _WAVE = "▁▂▃▄▅▆▇█▇▆▅▄▃▂▁"
-_MIN_WIDTH = 60
-_MAX_WIDTH = 96
+_VERBS = ("thinking", "reading", "planning", "writing", "checking", "working")
 
 
-def _w(s: str) -> None:
-    sys.stdout.write(s)
-    sys.stdout.flush()
+# ─── tiny formatters ─────────────────────────────────────────────────────
+def _now() -> str:
+    return datetime.now().strftime("%H:%M:%S")
 
 
-def clear_screen() -> None:
-    """Wipe the terminal and home the cursor."""
-    _w("\033[2J\033[3J\033[H")
-
-
-def _strip_ansi(s: str) -> str:
-    return _ANSI_RE.sub("", s)
-
-
-def _width() -> int:
-    cols = shutil.get_terminal_size((90, 24)).columns
-    return max(_MIN_WIDTH, min(_MAX_WIDTH, cols - 4))
-
-
-def _trim(text: str, limit: int | None = None) -> str:
-    limit = limit or _width()
-    clean = " ".join(str(text).split())
-    return clean if len(clean) <= limit else clean[: max(1, limit - 1)] + "."
+def _short_path(path: str, limit: int = 44) -> str:
+    s = str(path)
+    if len(s) <= limit:
+        return s
+    keep = max(8, limit - 3)
+    return "..." + s[-keep:]
 
 
 def _short_model(model: str) -> str:
@@ -100,12 +104,9 @@ def _short_model(model: str) -> str:
     return " ".join(parts)
 
 
-def _short_path(path: str, limit: int = 44) -> str:
-    path = str(path)
-    if len(path) <= limit:
-        return path
-    keep = max(8, limit - 3)
-    return "..." + path[-keep:]
+def _trim(text: str, limit: int) -> str:
+    clean = " ".join(str(text).split())
+    return clean if len(clean) <= limit else clean[: max(1, limit - 1)] + "."
 
 
 def _fmt_tokens(n: int) -> str:
@@ -126,33 +127,179 @@ def _ctx_color(pct: int) -> str:
     return ERR
 
 
-def _seg_bar(pct: int, width: int = 10) -> str:
-    pct = max(0, min(100, pct))
-    filled = int(width * pct / 100)
-    if pct and filled == 0:
-        filled = 1
-    on = ACCENT if pct < 50 else (WARN if pct < 80 else ERR)
-    return f"{on}{'▰' * filled}{FAINT}{'▱' * (width - filled)}{RST}"
+# ─── packet header (─[ XX · time ]──────────) ───────────────────────────
+def _packet_text(code: str, color: str) -> Text:
+    t = Text("  ─[ ", style=FAINT)
+    t.append(code, style=f"bold {color}")
+    t.append(" · ", style=FAINT)
+    t.append(_now(), style=MUTED)
+    t.append(" ]", style=FAINT)
+    rule_w = max(2, console.size.width - len(t.plain) - 2)
+    t.append("─" * rule_w, style=FAINT)
+    return t
 
 
-def _packet(code: str, color: str, ctx_pct: int | None = None) -> None:
-    """Render a `─[ XX · time · CTX N% ]──────` strip flush against the right edge."""
-    ts = time.strftime("%H:%M:%S")
-    head_parts = [
-        f"{FAINT}─[{RST} ",
-        f"{color}{B}{code}{RST}",
-        f" {FAINT}·{RST} {MUTED}{ts}{RST}",
-    ]
-    if ctx_pct is not None:
-        head_parts.append(f" {FAINT}·{RST} {FAINT}CTX {ctx_pct}%{RST}")
-    head_parts.append(f" {FAINT}]{RST}")
-    head = "".join(head_parts)
-    rule_w = max(2, _width() - len(_strip_ansi(head)) - 2)
-    print(f"  {head}{FAINT}{'─' * rule_w}{RST}")
+def _packet(code: str, color: str) -> None:
+    console.print(_packet_text(code, color))
 
 
-# ─── welcome ──────────────────────────────────────────────────────────────
+# ─── live region ────────────────────────────────────────────────────────
+def _build_status() -> Text:
+    elapsed = max(1, int(time.monotonic() - _state["loader_start"]))
+    offset = (elapsed * 4) % len(_WAVE)
+    wave = (_WAVE + _WAVE)[offset : offset + 14]
+    verb = _VERBS[(elapsed // 2) % len(_VERBS)]
 
+    t = Text("  ")
+    t.append(wave, style=ACCENT)
+    t.append("  ")
+    t.append(verb, style=MUTED)
+    t.append(f"  ({elapsed}s", style=FAINT)
+    if _state["loader_tokens"]:
+        t.append(f" · {_state['loader_tokens']:,} tok", style=FAINT)
+    t.append(")", style=FAINT)
+    return t
+
+
+def _build_todos_block() -> RenderableType | None:
+    items = _state["todos"]
+    if not items:
+        return None
+    rows: list[Text] = [_packet_text("JB", WARN)]
+    for it in items:
+        status = it.get("status", "pending")
+        text = it.get("text", "")
+        t = Text("  ")
+        if status == "done":
+            t.append("✓ ", style=ACCENT)
+            t.append(text, style=f"strike {FAINT}")
+        elif status == "doing":
+            t.append("■ ", style=WARN)
+            t.append(text, style=f"bold {INK}")
+        else:
+            t.append("□ ", style=FAINT)
+            t.append(text, style=MUTED)
+        rows.append(t)
+    return Group(*rows)
+
+
+class _LiveRenderable:
+    """Rebuilt by Rich on each refresh — pulls fresh state."""
+    def __rich__(self) -> RenderableType:
+        parts: list[RenderableType] = []
+        todos = _build_todos_block()
+        if todos is not None:
+            parts.append(todos)
+            parts.append(Text(""))
+        parts.append(_build_status())
+        return Group(*parts)
+
+
+def _live_start() -> None:
+    if _state["live"] is not None:
+        return
+    live = Live(
+        _LiveRenderable(),
+        console=console,
+        refresh_per_second=12,
+        transient=True,
+    )
+    live.start(refresh=True)
+    _state["live"] = live
+
+
+def _live_stop() -> None:
+    live = _state["live"]
+    if live is None:
+        return
+    live.stop()
+    _state["live"] = None
+
+
+def _suspend_live():
+    """Context manager: pause the live region so input() works cleanly."""
+    class _Ctx:
+        def __enter__(self_):
+            self_.was = _state["live"] is not None
+            if self_.was:
+                _live_stop()
+            return self_
+        def __exit__(self_, *exc):
+            if self_.was:
+                _live_start()
+    return _Ctx()
+
+
+# ─── typewriter pipe ────────────────────────────────────────────────────
+class _Typewriter:
+    """Drains chunks into a per-character stream at adaptive cadence.
+
+    Chunks arrive in bursts; the worker thread emits one char at a time
+    so output feels typed rather than dumped. Cadence speeds up when the
+    backlog grows so long responses finish promptly.
+    """
+    def __init__(self, on_char) -> None:
+        self._on_char = on_char
+        self._q: deque[str] = deque()
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._running = False
+
+    def start(self) -> None:
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+        self._wake.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        # Flush anything left.
+        while self._q:
+            self._on_char(self._q.popleft())
+
+    def write(self, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            self._q.extend(text)
+        self._wake.set()
+
+    def _loop(self) -> None:
+        while self._running:
+            self._wake.wait(timeout=0.05)
+            self._wake.clear()
+            while self._q and self._running:
+                with self._lock:
+                    backlog = len(self._q)
+                    ch = self._q.popleft() if self._q else None
+                if ch is None:
+                    break
+                self._on_char(ch)
+                # Adaptive: faster when backlog grows.
+                if backlog > 400:
+                    delay = 0.0008
+                elif backlog > 120:
+                    delay = 0.003
+                elif backlog > 30:
+                    delay = 0.006
+                else:
+                    delay = 0.012
+                time.sleep(delay)
+
+
+def _emit_with_rail(rail: Text, ch: str, ink_style: str) -> None:
+    """Write one char honouring the rail prefix on newlines."""
+    if ch == "\n":
+        console.print()
+        console.print(rail, end="")
+    else:
+        console.print(ch, style=ink_style, end="", markup=False, highlight=False)
+
+
+# ─── welcome / chrome ───────────────────────────────────────────────────
 def welcome(
     provider: str,
     model: str,
@@ -162,6 +309,7 @@ def welcome(
     cwd: str = ".",
 ) -> None:
     friendly = _short_model(model)
+
     auth_line = "no auth"
     if auth_kind == "oauth":
         auth_line = auth_email or "Claude OAuth"
@@ -170,43 +318,65 @@ def welcome(
     elif auth_kind:
         auth_line = auth_kind
 
-    width = _width()
-    tool_count = _tool_count()
+    width = console.size.width
 
-    print()
-    # Top edge with logo
-    head = f"  {FAINT}╭─{RST}{ACCENT}{B} CRYPT {RST}{FAINT}── {MUTED}transmission console {FAINT}── "
-    head_w = len(_strip_ansi(head)) - 2
-    print(head + f"{FAINT}{'─' * max(2, width - head_w)}{RST}")
+    # top edge with logo
+    top = Text("  ╭─", style=FAINT)
+    top.append(" CRYPT ", style=f"bold {ACCENT}")
+    top.append("── ", style=FAINT)
+    top.append("transmission console ", style=MUTED)
+    top.append("── ", style=FAINT)
+    rule_w = max(2, width - len(top.plain) - 2)
+    top.append("─" * rule_w, style=FAINT)
 
-    # Three info rows with status bullets
-    print(
-        f"  {FAINT}│  {ACCENT}●{RST}  {MUTED}LINK   {RST}"
-        f"{INK}{B}{friendly}{RST} {FAINT}via{RST} {MUTED}{provider}{RST}"
-    )
-    print(
-        f"  {FAINT}│       {RST}{MUTED}{auth_line}{RST}"
-    )
-    print(
-        f"  {FAINT}│  ◌  {MUTED}CWD    {RST}{INK}{_short_path(cwd, 60)}{RST}"
-    )
-    print(
-        f"  {FAINT}│  ▰  {MUTED}TOOLS  {RST}{INK}{tool_count} loaded{RST}"
-        f"  {FAINT}·{RST}  {FAINT}/status for details{RST}"
-    )
+    # info rows
+    link = Text("  │  ", style=FAINT)
+    link.append("●", style=ACCENT)
+    link.append("  ")
+    link.append("LINK   ", style=MUTED)
+    link.append(friendly, style=f"bold {INK}")
+    link.append(" via ", style=FAINT)
+    link.append(provider, style=MUTED)
 
-    # Bottom edge
-    print(f"  {FAINT}╰─{'─' * max(2, width - 2)}{RST}")
-    print()
-    # Command rail
-    cmds = ["/help", "/status", "/login", "/logout", "/quit"]
-    rail = f"  {ACCENT}▸{RST}  " + f"  {FAINT}·{RST}  ".join(f"{MUTED}{c}{RST}" for c in cmds)
-    print(rail)
-    print()
+    auth = Text("  │       ", style=FAINT)
+    auth.append(auth_line, style=MUTED)
+
+    cwd_row = Text("  │  ", style=FAINT)
+    cwd_row.append("◌", style=MUTED)
+    cwd_row.append("  ")
+    cwd_row.append("CWD    ", style=MUTED)
+    cwd_row.append(_short_path(cwd, 60), style=INK)
+
+    tools_row = Text("  │  ", style=FAINT)
+    tools_row.append("▰", style=ACCENT)
+    tools_row.append("  ")
+    tools_row.append("TOOLS  ", style=MUTED)
+    tools_row.append(f"{_tool_count()} loaded", style=INK)
+    tools_row.append("  ·  /status for details", style=FAINT)
+
+    bottom = Text("  ╰─", style=FAINT)
+    bottom.append("─" * max(2, width - 2), style=FAINT)
+
+    cmds = Text("  ▸  ", style=ACCENT)
+    sep = Text("  ·  ", style=FAINT)
+    for i, cmd in enumerate(("/help", "/status", "/login", "/logout", "/quit")):
+        if i:
+            cmds.append_text(sep)
+        cmds.append(cmd, style=MUTED)
+
+    console.print()
+    console.print(top)
+    console.print(link)
+    console.print(auth)
+    console.print(cwd_row)
+    console.print(tools_row)
+    console.print(bottom)
+    console.print()
+    console.print(cmds)
+    console.print()
 
 
 def _tool_count() -> int:
-    """Lazy import to avoid circular dependency with tools.registry."""
     try:
         from tools import REGISTRY
         return len(REGISTRY.schemas())
@@ -214,187 +384,128 @@ def _tool_count() -> int:
         return 0
 
 
-# ─── prompt + status ──────────────────────────────────────────────────────
-
-def user_prompt(status: str | None = None, yolo: bool = False) -> str:
-    if status:
-        print(f"  {FAINT}{status}{RST}")
-    bg = ERR_BG if yolo else ACCENT_BG
-    fg = ERR if yolo else ACCENT
-    try:
-        return input(f"  {bg}{fg}{B} >> {RST}  ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return "/quit"
+def clear_screen() -> None:
+    console.clear()
 
 
-def todos_status(items: list[dict]) -> str:
-    if not items:
-        return ""
-    done = sum(1 for t in items if t.get("status") == "done")
-    total = len(items)
-    doing = next((t for t in items if t.get("status") == "doing"), None)
-    base = f"todos {done}/{total}"
-    if not doing:
-        return base
-    text = " ".join(doing.get("text", "").split())
-    room = _width() - len(base) - 12
-    if room < 8:
-        return base
-    if len(text) > room:
-        text = text[: room - 1] + "."
-    return f"{base} · doing: {text}"
-
-
-# ─── messages ─────────────────────────────────────────────────────────────
-
+# ─── messages ───────────────────────────────────────────────────────────
 def info(text: str) -> None:
-    print(f"  {ALT}·{RST} {MUTED}{text}{RST}")
+    t = Text("  · ", style=ALT)
+    t.append(text, style=MUTED)
+    console.print(t)
 
 
 def error(text: str) -> None:
     for i, line in enumerate(str(text).splitlines() or [""]):
-        lead = f"{ERR}{B}!{RST}" if i == 0 else f" "
-        print(f"  {lead} {ERR}{line}{RST}")
+        t = Text("  ! " if i == 0 else "    ", style=f"bold {ERR}")
+        t.append(line, style=ERR)
+        console.print(t)
 
 
 def workspace_changed(path: str) -> None:
     _packet("CW", ALT)
-    print(f"  {ALT}▸{RST} {INK}{_short_path(path, 70)}{RST}")
-    print()
+    t = Text("  ")
+    t.append("▸ ", style=ALT)
+    t.append(_short_path(path, 70), style=INK)
+    console.print(t)
+    console.print()
 
 
-# ─── streaming ────────────────────────────────────────────────────────────
+# ─── prompts ────────────────────────────────────────────────────────────
+def user_prompt(yolo: bool = False) -> str:
+    width = console.size.width
+    sep = Text("  ╶" + "─" * max(2, width - 4), style=FAINT)
+    console.print(sep)
 
-def thinking_start() -> None:
-    _packet("TH", MUTED)
-    _w(f"  {FAINT}{IT}")
+    bg = ERR_BG if yolo else INPUT_BG
+    fg = ERR if yolo else ACCENT
+    prompt_text = Text("  ")
+    prompt_text.append(" >> ", style=f"bold {fg} {bg}")
+    prompt_text.append("  ")
 
-
-def thinking_chunk(text: str) -> None:
-    _w(text.replace("\n", f"{RST}\n  {FAINT}{IT}"))
-
-
-def thinking_end() -> None:
-    _w(f"{RST}\n\n")
-
-
-def assistant_start() -> None:
-    _packet("RP", ACCENT)
-    _w(f"  {ACCENT}▌{RST} {INK}")
-
-
-def assistant_chunk(text: str) -> None:
-    _w(text.replace("\n", f"{RST}\n  {ACCENT}▌{RST} {INK}"))
-
-
-def assistant_end() -> None:
-    _w(f"{RST}\n\n")
-
-
-# ─── tools ────────────────────────────────────────────────────────────────
-
-def tool_call(name: str, summary: str) -> None:
-    summary = _trim(summary, _width() - len(name) - 8)
-    print(f"  {ACCENT}▸{RST} {INK}{name}{RST}  {MUTED}{summary}{RST}")
-
-
-def tool_result(ok: bool, output: str = "") -> None:
-    text = (output or "").rstrip()
-    if not text or text == "(no output)":
-        return
-    lines = text.splitlines()
-
-    if not ok:
-        head = _trim(lines[0], _width() - 6)
-        print(f"  {ERR}!{RST} {ERR}{head}{RST}")
-        rest = lines[1:]
-        cap = 5
-    else:
-        rest = lines
-        cap = 5
-
-    for line in rest[:cap]:
-        clean = _trim(line, _width() - 6)
-        print(f"    {FAINT}{clean}{RST}")
-    if len(rest) > cap:
-        print(f"    {FAINT}+ {len(rest) - cap} more{RST}")
-
-
-# ─── y/n + choice ─────────────────────────────────────────────────────────
-
-def _getkey() -> str | None:
-    try:
-        if not sys.stdin.isatty():
-            return None
-        if os.name == "nt":
-            import msvcrt
-            ch = msvcrt.getwch()
-            if ch == "\x03":
-                raise KeyboardInterrupt
-            return ch.lower()
-        import termios
-        import tty
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
+    with _suspend_live():
         try:
-            tty.setraw(fd)
-            ch = sys.stdin.read(1)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        if ch == "\x03":
-            raise KeyboardInterrupt
-        return ch.lower()
-    except KeyboardInterrupt:
-        raise
-    except Exception:
-        return None
+            return console.input(prompt_text).strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            return "/quit"
 
 
 def ask(question: str) -> bool:
-    _w(f"  {WARN}?{RST} {INK}{question}{RST} {MUTED}(y/N){RST} ")
-    while True:
+    q = Text("  ? ", style=f"bold {WARN}")
+    q.append(question, style=INK)
+    q.append("  (y/N) ", style=MUTED)
+    with _suspend_live():
         try:
-            ch = _getkey()
-        except KeyboardInterrupt:
-            print()
+            ans = console.input(q).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
             return False
-        if ch is None:
+    return ans in ("y", "yes")
+
+
+def ask_choice(question: str, options: list[str]) -> str:
+    console.print()
+    _packet("PK", WARN)
+    head = Text("  ▌ ", style=WARN)
+    head.append(question, style=INK)
+    console.print(head)
+
+    if not options:
+        with _suspend_live():
             try:
-                ans = input("").strip().lower()
+                return console.input(Text("  ╘══ ▶ ", style=ACCENT)).strip()
             except (EOFError, KeyboardInterrupt):
-                print()
-                return False
-            if ans in ("y", "yes"):
-                return True
-            if ans in ("", "n", "no"):
-                return False
-            _w(f"  {WARN}?{RST} {INK}{question}{RST} {MUTED}(y/N){RST} ")
-            continue
-        if ch == "y":
-            print(f"{ACCENT}y{RST}")
-            return True
-        if ch in ("n", "\r", "\n", " ", "\x1b"):
-            print(f"{MUTED}n{RST}")
-            return False
+                console.print()
+                return ""
+
+    for i, opt in enumerate(options, 1):
+        row = Text("  ╞══  ", style=FAINT)
+        row.append(f"{i} · ", style=MUTED)
+        row.append(opt, style=INK)
+        console.print(row)
+
+    while True:
+        with _suspend_live():
+            try:
+                raw = console.input(Text("  ╘══ ▶ ", style=ACCENT)).strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                return options[0]
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1]
+        for opt in options:
+            if raw.lower() == opt.lower():
+                return opt
+        error(f"choose 1-{len(options)} or type a listed option")
 
 
 def splash_choice(label: str, options: list[tuple[str, str]], default_idx: int = 1) -> str:
-    """Setup-style picker. Options are (value, display) tuples. Returns value."""
-    print()
+    console.print()
     _packet("SETUP", ALT)
-    print(f"  {ALT}▌{RST} {INK}{B}{label}{RST}")
-    print()
+    head = Text("  ▌ ", style=ALT)
+    head.append(label, style=f"bold {INK}")
+    console.print(head)
+    console.print()
+
     for i, (_, desc) in enumerate(options, 1):
-        marker = f"{ACCENT}▶{RST}" if i == default_idx else f"{FAINT}▷{RST}"
-        print(f"  {FAINT}╞══{RST}  {marker}  {MUTED}{i:>2} ·{RST} {INK}{desc}{RST}")
-    print()
+        marker = Text("▶", style=ACCENT) if i == default_idx else Text("▷", style=FAINT)
+        row = Text("  ╞══  ", style=FAINT)
+        row.append_text(marker)
+        row.append(f"  {i:>2} · ", style=MUTED)
+        row.append(desc, style=INK)
+        console.print(row)
+    console.print()
+
     while True:
-        try:
-            raw = input(f"  {ACCENT}╘══ ▶{RST} {FAINT}[{default_idx}]{RST} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return options[default_idx - 1][0]
+        prompt = Text("  ╘══ ▶ ", style=ACCENT)
+        prompt.append(f"[{default_idx}] ", style=FAINT)
+        with _suspend_live():
+            try:
+                raw = console.input(prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                return options[default_idx - 1][0]
         if not raw:
             return options[default_idx - 1][0]
         if raw.isdigit() and 1 <= int(raw) <= len(options):
@@ -402,94 +513,194 @@ def splash_choice(label: str, options: list[tuple[str, str]], default_idx: int =
         for value, _ in options:
             if raw == value:
                 return value
-        print(f"  {ERR}!{RST} {ERR}choose 1-{len(options)} or type a listed value{RST}")
+        error(f"choose 1-{len(options)} or type a listed value")
 
 
-def ask_choice(question: str, options: list[str]) -> str:
-    print()
-    _packet("PK", WARN)
-    print(f"  {WARN}▌{RST} {INK}{question}{RST}")
-    if not options:
-        try:
-            return input(f"  {ACCENT}╘══ ▶{RST} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return ""
-
-    for i, opt in enumerate(options, 1):
-        print(f"  {FAINT}╞══{RST}  {MUTED}{i} ·{RST} {INK}{opt}{RST}")
-    while True:
-        try:
-            raw = input(f"  {ACCENT}╘══ ▶{RST} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return options[0]
-        if raw.isdigit() and 1 <= int(raw) <= len(options):
-            return options[int(raw) - 1]
-        for opt in options:
-            if raw.lower() == opt.lower():
-                return opt
-        print(f"  {ERR}!{RST} {ERR}choose 1-{len(options)} or type a listed option{RST}")
+def read_multiline(prompt: str = "") -> str:
+    """Read input until a blank line. Ctrl+D / Ctrl+Z also ends. Ctrl+C aborts."""
+    if prompt:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+    lines: list[str] = []
+    try:
+        while True:
+            try:
+                line = input()
+            except EOFError:
+                break
+            if not line.strip():
+                break
+            lines.append(line)
+    except KeyboardInterrupt:
+        return ""
+    return "\n".join(lines).strip()
 
 
-# ─── panels ───────────────────────────────────────────────────────────────
+def feedback_prompt() -> str:
+    """Prompt used by present_plan rejection — keeps colour out of plan.py."""
+    head = Text("  > feedback ", style=GOLD)
+    head.append("(paste or type, blank line to send, ctrl+c to abort)", style=FAINT)
+    console.print(head)
+    with _suspend_live():
+        return read_multiline("  ")
 
-def todos_panel(items: list[dict]) -> None:
-    if not items:
+
+# ─── streaming ──────────────────────────────────────────────────────────
+def _start_stream(packet_code: str, packet_color: str, rail_color: str, ink_style: str) -> None:
+    _packet(packet_code, packet_color)
+    rail = Text("  ▌ ", style=rail_color)
+    console.print(rail, end="")
+
+    def on_char(ch: str) -> None:
+        _emit_with_rail(rail, ch, ink_style)
+
+    pipe = _Typewriter(on_char)
+    pipe.start()
+    _state["pipe"] = pipe
+
+
+def _stop_stream() -> None:
+    pipe: _Typewriter | None = _state.get("pipe")
+    if pipe is not None:
+        pipe.stop()
+        _state["pipe"] = None
+    console.print()
+    console.print()
+
+
+def thinking_start() -> None:
+    _start_stream("TH", MUTED, MUTED, f"italic {FAINT}")
+
+
+def thinking_chunk(text: str) -> None:
+    pipe: _Typewriter | None = _state.get("pipe")
+    if pipe is not None:
+        pipe.write(text)
+
+
+def thinking_end() -> None:
+    _stop_stream()
+
+
+def assistant_start() -> None:
+    _start_stream("RP", ACCENT, ACCENT, INK)
+
+
+def assistant_chunk(text: str) -> None:
+    pipe: _Typewriter | None = _state.get("pipe")
+    if pipe is not None:
+        pipe.write(text)
+
+
+def assistant_end() -> None:
+    _stop_stream()
+
+
+# ─── tools ──────────────────────────────────────────────────────────────
+def tool_call(name: str, summary: str) -> None:
+    width = console.size.width
+    t = Text("  ")
+    t.append("▸ ", style=ACCENT)
+    t.append(name, style=INK)
+    t.append("  ")
+    t.append(_trim(summary, width - len(name) - 8), style=MUTED)
+    console.print(t)
+
+
+def tool_result(ok: bool, output: str = "") -> None:
+    text = (output or "").rstrip()
+    if not text or text == "(no output)":
         return
-    print()
-    _packet("JB", WARN)
-    for it in items:
-        status = it.get("status", "pending")
-        text = _trim(it.get("text", ""), _width() - 22)
-        if status == "done":
-            bars = f"{ACCENT}▰▰▰▰▰{RST}"
-            label = f"{FAINT}{text}{RST}"
-            badge = f"{ACCENT_BG}{ACCENT}{B} DONE {RST}"
-        elif status == "doing":
-            bars = f"{WARN}▰▰▱▱▱{RST}"
-            label = f"{INK}{text}{RST}"
-            badge = f"{WARN_BG}{WARN}{B}  NOW {RST}"
-        else:
-            bars = f"{FAINT}▱▱▱▱▱{RST}"
-            label = f"{MUTED}{text}{RST}"
-            badge = f"{FAINT}next{RST}"
-        print(f"  {bars}  {label}  {badge}")
-    print()
+    width = console.size.width
+    lines = text.splitlines()
+    if not ok:
+        head = Text("  ! ", style=f"bold {ERR}")
+        head.append(_trim(lines[0], width - 6), style=ERR)
+        console.print(head)
+        rest, cap = lines[1:], 5
+    else:
+        rest, cap = lines, 5
+    for line in rest[:cap]:
+        row = Text("    ")
+        row.append(_trim(line, width - 6), style=FAINT)
+        console.print(row)
+    if len(rest) > cap:
+        more = Text("    ")
+        more.append(f"+ {len(rest) - cap} more", style=FAINT)
+        console.print(more)
+
+
+# ─── panels ─────────────────────────────────────────────────────────────
+def todos_panel(items: list[dict]) -> None:
+    """Mirror the model's todos into the live region.
+
+    When a live region is active, the next refresh picks up the new state
+    automatically. When idle, render the panel inline so the user sees
+    the change."""
+    _state["todos"] = list(items)
+    if _state["live"] is None:
+        block = _build_todos_block()
+        if block is not None:
+            console.print(block)
+            console.print()
+
+
+def todos_status(items: Iterable[dict]) -> str:
+    items = list(items)
+    if not items:
+        return ""
+    done = sum(1 for t in items if t.get("status") == "done")
+    doing = next((t for t in items if t.get("status") == "doing"), None)
+    base = f"todos {done}/{len(items)} done"
+    if not doing:
+        return base
+    return f"{base} · doing: {doing.get('text', '')}"
 
 
 def plan_panel(title: str, body: str) -> None:
-    print()
+    console.print()
     _packet("PL", WARN)
-    print(f"  {WARN}▌{RST} {INK}{B}{_trim(title, _width() - 4)}{RST}")
+    head = Text("  ▌ ", style=WARN)
+    head.append(_trim(title, console.size.width - 4), style=f"bold {INK}")
+    console.print(head)
     for line in body.splitlines() or [""]:
-        print(f"  {WARN}▌{RST} {INK}{line}{RST}")
-    print()
+        row = Text("  ▌ ", style=WARN)
+        row.append(line, style=INK)
+        console.print(row)
+    console.print()
 
 
 def status_panel(rows: dict) -> None:
-    print()
+    console.print()
     _packet("STATUS", ALT)
-    width = max(len(k) for k in rows.keys()) if rows else 8
+    width = max((len(k) for k in rows), default=8)
     for k, v in rows.items():
-        print(f"  {MUTED}{k:<{width}}{RST}  {INK}{v}{RST}")
-    print()
+        row = Text("  ")
+        row.append(f"{k:<{width}}", style=MUTED)
+        row.append("  ")
+        row.append(str(v), style=INK)
+        console.print(row)
+    console.print()
 
-
-# ─── subagent markers ─────────────────────────────────────────────────────
 
 def subagent_start(description: str) -> None:
     _packet("AG", HOT)
-    print(f"  {HOT}▸{RST} {INK}{_trim(description, _width() - 4)}{RST}")
+    t = Text("  ")
+    t.append("▸ ", style=HOT)
+    t.append(_trim(description, console.size.width - 4), style=INK)
+    console.print(t)
 
 
 def subagent_end(ok: bool, description: str) -> None:
-    label = f"{ACCENT}✓ done{RST}" if ok else f"{ERR}✗ failed{RST}"
-    print(f"  {label}  {FAINT}{_trim(description, _width() - 12)}{RST}")
-    print()
+    label = "✓ done" if ok else "✗ failed"
+    color = ACCENT if ok else ERR
+    t = Text("  ")
+    t.append(label, style=color)
+    t.append("  ")
+    t.append(_trim(description, console.size.width - 12), style=FAINT)
+    console.print(t)
+    console.print()
 
-
-# ─── footer ───────────────────────────────────────────────────────────────
 
 def footer(
     model: str,
@@ -500,73 +711,55 @@ def footer(
     yolo: bool = False,
 ) -> None:
     friendly = _short_model(model)
-    ctx_c = _ctx_color(ctx_pct)
-    yolo_tag = f"{FAINT} · {ERR_BG}{ERR}{B} YOLO {RST}" if yolo else ""
-    bar = _seg_bar(ctx_pct)
+    bar_w = 10
+    filled = int(bar_w * max(0, min(100, ctx_pct)) / 100)
+    if ctx_pct and filled == 0:
+        filled = 1
+    ctx_color = _ctx_color(ctx_pct)
 
-    parts = [
-        f"{FAINT}─[ {RST}",
-        f"{MUTED}STA{RST}",
-        f"{FAINT} · {RST}",
-        f"{MUTED}{friendly}{RST}",
-        yolo_tag,
-        f"{FAINT} · {RST}",
-        bar,
-        f" {ctx_c}{B}{ctx_pct:>2}%{RST}",
-        f"{FAINT} · {RST}",
-        f"{MUTED}{_fmt_tokens(ctx_tokens)} / {_fmt_tokens(session_tokens)}{RST}",
-        f"{FAINT} · {RST}",
-        f"{MUTED}{_short_path(cwd, 32)}{RST}",
-        f"{FAINT} ]{RST}",
-    ]
-    head = "".join(parts)
-    visible = len(_strip_ansi(head))
-    rule_w = max(2, _width() - visible - 2)
-    print()
-    print(f"  {head}{FAINT}{'─' * rule_w}{RST}")
-    print()
+    t = Text("  ─[ ", style=FAINT)
+    t.append("STA", style=MUTED)
+    t.append(" · ", style=FAINT)
+    t.append(friendly, style=MUTED)
+    if yolo:
+        t.append(" · ", style=FAINT)
+        t.append(" YOLO ", style=f"bold {ERR} {ERR_BG}")
+    t.append(" · ", style=FAINT)
+    t.append("▰" * filled, style=ctx_color)
+    t.append("▱" * (bar_w - filled), style=FAINT)
+    t.append(f" {ctx_pct:>2}%", style=f"bold {ctx_color}")
+    t.append(" · ", style=FAINT)
+    t.append(f"{_fmt_tokens(ctx_tokens)} / {_fmt_tokens(session_tokens)}", style=MUTED)
+    t.append(" · ", style=FAINT)
+    t.append(_short_path(cwd, 32), style=MUTED)
+    t.append(" ]", style=FAINT)
+    rule_w = max(2, console.size.width - len(t.plain) - 2)
+    t.append("─" * rule_w, style=FAINT)
+
+    console.print()
+    console.print(t)
+    console.print()
 
 
-# ─── animated loader ──────────────────────────────────────────────────────
-
+# ─── loader (the live region) ───────────────────────────────────────────
 class Loader:
+    """Owns the live region: pinned status + todos panel.
+
+    The region stays up the entire turn — streaming text scrolls above
+    it via `console.print`, so the user always sees a live status at the
+    bottom and the current todos right above it.
+    """
     def __init__(self, base_tokens: int = 0) -> None:
-        self._base_tokens = base_tokens
-        self._running = False
-        self._thread: threading.Thread | None = None
-        self._tick = 0
-        self._start = 0.0
+        self._base = base_tokens
 
     @property
     def running(self) -> bool:
-        return self._running
+        return _state["live"] is not None
 
     def start(self) -> None:
-        self._running = True
-        self._tick = 0
-        self._start = time.monotonic()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        _state["loader_start"] = time.monotonic()
+        _state["loader_tokens"] = self._base
+        _live_start()
 
     def stop(self) -> None:
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=2)
-            self._thread = None
-        _w(f"\r{CLR}")
-
-    def _loop(self) -> None:
-        wave_len = 14
-        verbs = ("thinking", "reading", "planning", "writing", "checking", "working")
-        while self._running:
-            offset = self._tick % len(_WAVE)
-            wave = (_WAVE + _WAVE)[offset : offset + wave_len]
-            verb = verbs[(self._tick // 16) % len(verbs)]  # ~1.6s per verb
-            elapsed = int(time.monotonic() - self._start) + 1
-            tok = f" · {self._base_tokens:,} tok" if self._base_tokens else ""
-            _w(
-                f"\r{CLR}  {ACCENT}{wave}{RST}  "
-                f"{MUTED}{verb}{RST} {FAINT}({elapsed}s{tok}){RST}"
-            )
-            time.sleep(0.10)
-            self._tick += 1
+        _live_stop()
