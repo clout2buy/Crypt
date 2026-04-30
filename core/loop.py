@@ -17,6 +17,12 @@ Work like a careful engineer:
 - keep changes small, idiomatic, and easy to review
 - run focused tests or checks after edits when practical
 - when using todos, keep narration minimal and let the live todo panel show progress
+- execute large requests one verified phase at a time unless the user explicitly says to do all phases now
+- keep execution narration short; avoid long audits unless asked
+- never claim a phase is complete without naming the verification that passed
+- if an edit tool fails in a risky state, stop and explain the recovery instead of improvising shell hacks
+- if a tool is denied or fails with a permission error, adapt to the user's feedback instead of retrying stale calls
+- open_file only opens a file for the user; it does not let you inspect image/video contents
 - be concise and report blockers directly
 """.strip()
 
@@ -31,7 +37,12 @@ def _build_system_prompt() -> str:
 SYSTEM_PROMPT = _build_system_prompt()
 
 
-def run(provider: Provider, show_thinking: bool = False, cwd: str = ".") -> str | None:
+def run(
+    provider: Provider,
+    show_thinking: bool = False,
+    cwd: str = ".",
+    model_switcher=None,
+) -> str | None:
     """Run the TAOR loop. Returns 'login'/'logout' if the user asked, or None on quit."""
     messages: list[dict] = []
     current_tokens = 0
@@ -41,7 +52,10 @@ def run(provider: Provider, show_thinking: bool = False, cwd: str = ".") -> str 
 
     while True:
         REGISTRY.before_prompt()
-        user_text = ui.user_prompt(yolo=runtime.yolo())
+        user_text = ui.user_prompt(
+            yolo=runtime.yolo(),
+            approval=runtime.approval_label(),
+        )
         if not user_text:
             continue
         if user_text in ("/quit", "/exit", "exit", "quit"):
@@ -50,7 +64,17 @@ def run(provider: Provider, show_thinking: bool = False, cwd: str = ".") -> str 
         if user_text == "/help":
             _show_help()
             continue
-        if user_text in ("/login", "/logout"):
+        if user_text in ("/login", "/logout", "/model"):
+            if user_text == "/model" and model_switcher:
+                new_provider = model_switcher(provider)
+                if new_provider is not None:
+                    provider = new_provider
+                    runtime.configure(
+                        provider,
+                        runtime.cwd(),
+                        lambda prompt: _run_subagent(provider, prompt),
+                    )
+                continue
             return user_text.lstrip("/")
         if user_text == "/clear":
             messages.clear()
@@ -59,9 +83,8 @@ def run(provider: Provider, show_thinking: bool = False, cwd: str = ".") -> str 
             session_tokens = 0
             ui.info("context cleared")
             continue
-        if user_text == "/yolo":
-            on = runtime.set_yolo(not runtime.yolo())
-            ui.info(f"yolo {'on - auto-approving all tools' if on else 'off'}")
+        if user_text.startswith("/yolo") or user_text == "/safe":
+            _handle_yolo(user_text)
             continue
         if user_text == "/thinking":
             on = runtime.set_show_thinking(not runtime.show_thinking())
@@ -89,6 +112,10 @@ def run(provider: Provider, show_thinking: bool = False, cwd: str = ".") -> str 
             current_tokens, session_tokens = _run_until_done(
                 provider, messages, current_tokens, session_tokens,
             )
+        except KeyboardInterrupt:
+            del messages[checkpoint:]
+            _stub_dangling_tools(messages)
+            ui.info("interrupted - turn cancelled")
         except Exception as e:
             del messages[checkpoint:]
             _stub_dangling_tools(messages)
@@ -107,10 +134,13 @@ def _run_until_done(
     loader = ui.Loader(base_tokens=current_tokens)
     loader.start()
     try:
-        for _ in range(max_turns):
+        budget = max_turns
+        used = 0
+        while used < budget:
             _ensure_tool_result_pairing(messages)
             end = _stream_with_retry(provider, messages, tools, loader)
             messages.append(end.message)
+            used += 1
 
             if end.usage:
                 turn = (
@@ -132,15 +162,26 @@ def _run_until_done(
                         current_tokens, session_tokens,
                         runtime.cwd(),
                         yolo=runtime.yolo(),
+                        approval=runtime.approval_label(),
                     )
                 return current_tokens, session_tokens
 
             _dispatch_tool_uses(end.message, messages)
             _ensure_tool_result_pairing(messages)
 
+            # Budget check: instead of dying silently at max_turns, ask the
+            # user whether to extend. Subagents just stop at their cap.
+            if used >= budget and not is_subagent:
+                loader.stop()
+                if ui.ask(f"used {used} turns on this task - continue for {max_turns} more?"):
+                    budget += max_turns
+                    loader.start()
+                else:
+                    break
+
         _stub_dangling_tools(messages)
         _ensure_tool_result_pairing(messages)
-        ui.error(f"max turns ({max_turns}) exceeded")
+        ui.error(f"stopped after {used} turns")
         return current_tokens, session_tokens
     finally:
         if loader.running:
@@ -201,11 +242,12 @@ def _stream_one_turn(
 
 def _dispatch_tool_uses(assistant_msg: dict, messages: list[dict]) -> None:
     results: list[dict] = []
-    for block in assistant_msg.get("content", []):
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") != "tool_use":
-            continue
+    tool_blocks = [
+        block
+        for block in assistant_msg.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    for idx, block in enumerate(tool_blocks):
         ok, output = dispatch(block["name"], block.get("input") or {})
         results.append({
             "type": "tool_result",
@@ -213,9 +255,34 @@ def _dispatch_tool_uses(assistant_msg: dict, messages: list[dict]) -> None:
             "content": output,
             "is_error": not ok,
         })
+        if _should_abort_tool_batch(ok, output):
+            skipped = tool_blocks[idx + 1:]
+            for pending in skipped:
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": pending["id"],
+                    "content": (
+                        "skipped: previous tool failed or was denied. "
+                        "Read the failure/feedback and choose the next step."
+                    ),
+                    "is_error": True,
+                })
+            if skipped:
+                ui.info(f"skipped {len(skipped)} queued tool call(s) after failure")
+            break
     if not results:
         raise RuntimeError("assistant stopped for tool_use without tool_use blocks")
     messages.append({"role": "user", "content": results})
+
+
+def _should_abort_tool_batch(ok: bool, output: str) -> bool:
+    if ok:
+        return False
+    text = str(output)
+    return (
+        text.startswith("denied by user")
+        or text.startswith("PermissionError:")
+    )
 
 
 _TRANSIENT_NAMES = {
@@ -241,6 +308,10 @@ def _is_transient(exc: Exception) -> bool:
     return any(h in msg for h in _TRANSIENT_HINTS)
 
 
+def _is_rate_limit(exc: Exception) -> bool:
+    return type(exc).__name__ == "RateLimitError" or "rate limit" in str(exc).lower()
+
+
 def _stream_with_retry(
     provider: Provider,
     messages: list[dict],
@@ -256,6 +327,8 @@ def _stream_with_retry(
             return _stream_one_turn(provider, messages, tools, loader)
         except Exception as e:
             last_err = e
+            if _is_rate_limit(e):
+                raise
             if not _is_transient(e) or attempt == len(delays):
                 raise
             wait = delays[attempt]
@@ -339,11 +412,41 @@ def _show_help() -> None:
     ui.info("/quit              exit crypt")
     ui.info("/help              this message")
     ui.info("/status            show provider, auth, tools, todos")
+    ui.info("/model             switch provider/model in this session")
     ui.info("/login   /logout   swap or sign out of Claude OAuth")
     ui.info("/clear             wipe context and todos")
-    ui.info("/yolo              toggle auto-approve for all tools")
+    ui.info("/yolo              auto-approve file edits only")
+    ui.info("/yolo all          auto-approve every tool (dangerous)")
+    ui.info("/yolo off /safe    return to manual approvals")
     ui.info("/thinking          toggle thinking display")
     ui.info("/cwd [path]        show or move workspace")
+
+
+def _handle_yolo(command: str) -> None:
+    arg = command[5:].strip().lower() if command.startswith("/yolo") else "off"
+    if command == "/safe" or arg in ("off", "false", "0", "manual"):
+        mode = runtime.set_approval_mode(runtime.APPROVAL_NORMAL)
+    elif arg in ("all", "full", "danger"):
+        mode = runtime.set_approval_mode(runtime.APPROVAL_ALL)
+    elif arg in ("", "edit", "edits", "trusted"):
+        current = runtime.approval_mode()
+        next_mode = (
+            runtime.APPROVAL_NORMAL
+            if current == runtime.APPROVAL_EDITS
+            else runtime.APPROVAL_EDITS
+        )
+        mode = runtime.set_approval_mode(next_mode)
+    else:
+        ui.info("usage: /yolo, /yolo all, /yolo off")
+        return
+
+    label = runtime.approval_label()
+    if mode == runtime.APPROVAL_EDITS:
+        ui.info("approval: auto-edits (file edits skip prompts; shell still asks)")
+    elif mode == runtime.APPROVAL_ALL:
+        ui.info("approval: yolo-all (all tool prompts bypassed)")
+    else:
+        ui.info(f"approval: {label}")
 
 
 def _show_status(provider: Provider, current_tokens: int, session_tokens: int) -> None:
@@ -372,7 +475,7 @@ def _show_status(provider: Provider, current_tokens: int, session_tokens: int) -
         "model": provider.model,
         "auth": auth_line,
         "cwd": runtime.cwd(),
-        "yolo": "on" if runtime.yolo() else "off",
+        "approval": runtime.approval_label(),
         "thinking": "on" if runtime.show_thinking() else "off",
         "tools": f"{len(REGISTRY.schemas())} loaded",
         "todos": f"{done} done · {doing} doing · {pending} pending" if todos else "none",
@@ -387,13 +490,12 @@ def _format_error(exc: Exception) -> str:
         return (
             f"{name}: {exc}\n"
             "   Anthropic rate limits count the requested output cap before generation. "
-            "Try --max-tokens 2048, --no-thinking, or wait for the retry window."
+            "Use /model to switch to Ollama Cloud, or restart with --max-tokens 2048."
         )
     if _is_transient(exc):
         return (
             f"{name}: {exc}\n"
             "   Provider is overloaded or unreachable. Tried with backoff. "
-            "Wait a minute or try a different model (/login to swap account, or "
-            "restart with --provider ollama --model qwen3-coder:480b-cloud)."
+            "Use /model to switch provider/model, or wait a minute and retry."
         )
     return f"{name}: {exc}"
