@@ -426,7 +426,11 @@ def _tool_count() -> int:
 
 
 def clear_screen() -> None:
-    console.clear()
+    # Rich's console.clear() only wipes the visible viewport. We also send
+    # \x1b[3J so the scrollback buffer (Windows Terminal / iTerm / gnome-
+    # terminal) is cleared — otherwise setup screens linger one scroll up.
+    sys.stdout.write("\x1b[2J\x1b[3J\x1b[H")
+    sys.stdout.flush()
 
 
 # ─── messages ───────────────────────────────────────────────────────────
@@ -453,6 +457,50 @@ def workspace_changed(path: str) -> None:
 
 
 # ─── prompts ────────────────────────────────────────────────────────────
+def _drain_buffered_lines(timeout_ms: int = 80) -> list[str]:
+    """After input() returns, drain any extra lines still in stdin from a paste.
+
+    `input()` returns at the first \\n, but a multi-line paste delivers all the
+    lines into the input buffer at once. This reads whatever's still queued so
+    a paste can be assembled into a single message. Empty lines inside the
+    paste are preserved."""
+    lines: list[str] = []
+    cur: list[str] = []
+    deadline = time.monotonic() + timeout_ms / 1000
+
+    if os.name == "nt":
+        import msvcrt
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch == "\r":
+                    continue
+                if ch == "\n":
+                    lines.append("".join(cur))
+                    cur = []
+                    deadline = time.monotonic() + timeout_ms / 1000
+                else:
+                    cur.append(ch)
+                    deadline = time.monotonic() + timeout_ms / 1000
+            else:
+                time.sleep(0.001)
+        if cur:
+            lines.append("".join(cur))
+        return lines
+
+    import select
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([sys.stdin], [], [], 0.020)
+        if not ready:
+            continue
+        line = sys.stdin.readline()
+        if not line:
+            break
+        lines.append(line.rstrip("\r\n"))
+        deadline = time.monotonic() + timeout_ms / 1000
+    return lines
+
+
 def user_prompt(yolo: bool = False) -> str:
     width = console.size.width
     sep = Text("  ╶" + "─" * max(2, width - 4), style=FAINT)
@@ -466,10 +514,26 @@ def user_prompt(yolo: bool = False) -> str:
 
     with _suspend_live():
         try:
-            return console.input(prompt_text).strip()
+            first = console.input(prompt_text)
         except (EOFError, KeyboardInterrupt):
             console.print()
             return "/quit"
+        extras = _drain_buffered_lines(80)
+
+    if extras:
+        # Multi-line paste detected — assemble the full message and show a
+        # compact placeholder so the scrollback isn't flooded by the paste.
+        full = (first + "\n" + "\n".join(extras)).strip()
+        total_lines = 1 + len(extras)
+        non_empty_chars = sum(len(line) for line in [first, *extras])
+        placeholder = Text("  ")
+        placeholder.append(
+            f"[{total_lines} lines · {non_empty_chars} chars pasted]",
+            style=f"italic {ALT}",
+        )
+        console.print(placeholder)
+        return full
+    return first.strip()
 
 
 def ask(question: str) -> bool:
