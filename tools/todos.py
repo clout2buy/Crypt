@@ -39,6 +39,18 @@ Do NOT call `todos` after every tool action — that floods the display
 with redundant updates. The user sees the panel once per turn, above
 their next prompt. Save your tool calls for actual state changes.
 
+## Demo / screenshot requests
+
+When the user asks to test or screenshot the todo UI:
+
+1. Create a small harmless list with 3-6 concrete items.
+2. Say one short setup sentence before the first todo update.
+3. Seed the list with the first item `doing` and the rest `pending`.
+4. Advance exactly one visible step per `todos` call. Do not jump straight to all done.
+5. Keep assistant narration minimal; the panel is the main output.
+6. Do not read huge files or run unrelated commands just to make progress.
+7. End with one concise completion sentence.
+
 ## Rules
 
 1. Pass the full list every call. The list is replaced, not merged.
@@ -73,6 +85,7 @@ _TODOS: list[dict] = []
 
 def clear() -> None:
     _TODOS.clear()
+    ui.todos_panel(_TODOS)
 
 
 def get_todos() -> list[dict]:
@@ -96,6 +109,7 @@ def run(args: dict) -> str:
 
     _TODOS.clear()
     _TODOS.extend(cleaned)
+    ui.todos_panel(_TODOS)
 
     done = sum(1 for t in _TODOS if t["status"] == "done")
     doing_item = next((t for t in _TODOS if t["status"] == "doing"), None)
@@ -106,7 +120,7 @@ def run(args: dict) -> str:
 
 
 def before_prompt() -> None:
-    if _TODOS:
+    if _TODOS and any(t.get("status") != "done" for t in _TODOS):
         ui.todos_panel(_TODOS)
 
 
@@ -148,4 +162,5 @@ TOOL = Tool(
     summary=summary,
     before_prompt=before_prompt,
     reset=clear,
+    quiet=True,
 )

@@ -79,6 +79,7 @@ _state = {
 
 _WAVE = "▁▂▃▄▅▆▇█▇▆▅▄▃▂▁"
 _VERBS = ("thinking", "reading", "planning", "writing", "checking", "working")
+_TODO_DWELL_SECONDS = 0.75
 
 
 # ─── tiny formatters ─────────────────────────────────────────────────────
@@ -144,8 +145,15 @@ def _packet(code: str, color: str) -> None:
 
 
 # ─── live region ────────────────────────────────────────────────────────
+def _elapsed() -> int:
+    start = _state["loader_start"]
+    if not start:
+        return 0
+    return max(1, int(time.monotonic() - start))
+
+
 def _build_status() -> Text:
-    elapsed = max(1, int(time.monotonic() - _state["loader_start"]))
+    elapsed = _elapsed() or 1
     offset = (elapsed * 4) % len(_WAVE)
     wave = (_WAVE + _WAVE)[offset : offset + 14]
     verb = _VERBS[(elapsed // 2) % len(_VERBS)]
@@ -165,21 +173,46 @@ def _build_todos_block() -> RenderableType | None:
     items = _state["todos"]
     if not items:
         return None
-    rows: list[Text] = [_packet_text("JB", WARN)]
-    for it in items:
+
+    done = sum(1 for it in items if it.get("status") == "done")
+    active = next((it for it in items if it.get("status") == "doing"), None)
+    elapsed = _elapsed()
+
+    head = Text("  ")
+    head.append("✓ " if done == len(items) else "● ", style=ACCENT if done == len(items) else WARN)
+    if active:
+        label = _trim(active.get("text", "working"), max(16, console.size.width - 34))
+        head.append(f"{label}...", style=f"bold {WARN}")
+    elif done == len(items):
+        head.append(f"All {len(items)} todos completed", style=INK)
+    else:
+        head.append(f"{done}/{len(items)} todos", style=INK)
+    if _state["live"] is not None and elapsed:
+        head.append(f" ({elapsed}s", style=FAINT)
+        if _state["loader_tokens"]:
+            head.append(f" · {_fmt_tokens(_state['loader_tokens'])} tok", style=FAINT)
+        head.append(")", style=FAINT)
+
+    rows: list[Text] = [head]
+    visible = items[:6]
+    for it in visible:
         status = it.get("status", "pending")
         text = it.get("text", "")
-        t = Text("  ")
+        t = Text("    ")
         if status == "done":
             t.append("✓ ", style=ACCENT)
             t.append(text, style=f"strike {FAINT}")
         elif status == "doing":
-            t.append("■ ", style=WARN)
+            t.append("■ ", style=ACCENT)
             t.append(text, style=f"bold {INK}")
         else:
             t.append("□ ", style=FAINT)
             t.append(text, style=MUTED)
         rows.append(t)
+    if len(items) > len(visible):
+        more = Text("    ... ", style=FAINT)
+        more.append(f"+{len(items) - len(visible)} more", style=MUTED)
+        rows.append(more)
     return Group(*rows)
 
 
@@ -190,8 +223,8 @@ class _LiveRenderable:
         todos = _build_todos_block()
         if todos is not None:
             parts.append(todos)
-            parts.append(Text(""))
-        parts.append(_build_status())
+        else:
+            parts.append(_build_status())
         return Group(*parts)
 
 
@@ -201,19 +234,27 @@ def _live_start() -> None:
     live = Live(
         _LiveRenderable(),
         console=console,
-        refresh_per_second=12,
+        refresh_per_second=4,
         transient=True,
     )
     live.start(refresh=True)
     _state["live"] = live
 
 
-def _live_stop() -> None:
+def _live_stop(render_todos: bool = False) -> None:
     live = _state["live"]
     if live is None:
         return
+    items = list(_state["todos"])
     live.stop()
     _state["live"] = None
+    if render_todos:
+        block = _build_todos_block()
+        if block is not None:
+            console.print(block)
+            console.print()
+    if items and all(it.get("status") == "done" for it in items):
+        _state["todos"] = []
 
 
 def _suspend_live():
@@ -546,7 +587,15 @@ def feedback_prompt() -> str:
 
 
 # ─── streaming ──────────────────────────────────────────────────────────
+# Live region must be paused while we stream typewriter text. Rich's Live
+# treats partial-line writes (console.print(..., end="")) as part of the
+# live region and erases them on the next refresh. Without pausing we get
+# empty packet headers stacking up while the model's actual text vanishes.
 def _start_stream(packet_code: str, packet_color: str, rail_color: str, ink_style: str) -> None:
+    _state["streaming_paused_live"] = _state["live"] is not None
+    if _state["streaming_paused_live"]:
+        _live_stop()
+
     _packet(packet_code, packet_color)
     rail = Text("  ▌ ", style=rail_color)
     console.print(rail, end="")
@@ -566,6 +615,8 @@ def _stop_stream() -> None:
         _state["pipe"] = None
     console.print()
     console.print()
+    if _state.pop("streaming_paused_live", False):
+        _live_start()
 
 
 def thinking_start() -> None:
@@ -634,15 +685,19 @@ def tool_result(ok: bool, output: str = "") -> None:
 def todos_panel(items: list[dict]) -> None:
     """Mirror the model's todos into the live region.
 
-    When a live region is active, the next refresh picks up the new state
-    automatically. When idle, render the panel inline so the user sees
-    the change."""
+    The active live region owns rendering. When idle, this only updates
+    state so completed/old lists do not get reprinted into the transcript."""
     _state["todos"] = list(items)
-    if _state["live"] is None:
-        block = _build_todos_block()
-        if block is not None:
-            console.print(block)
-            console.print()
+    live = _state["live"]
+    if live is None:
+        return
+
+    # Force the transition onto the terminal before the model continues.
+    # Without this, rapid todo calls can race Rich's auto-refresh and only
+    # the final state becomes visible.
+    live.update(_LiveRenderable(), refresh=True)
+    if items:
+        time.sleep(_TODO_DWELL_SECONDS)
 
 
 def todos_status(items: Iterable[dict]) -> str:
@@ -762,4 +817,4 @@ class Loader:
         _live_start()
 
     def stop(self) -> None:
-        _live_stop()
+        _live_stop(render_todos=bool(_state["todos"]))

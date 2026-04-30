@@ -17,3 +17,4 @@ class Tool:
     before_prompt: Callable[[], None] | None = None
     reset: Callable[[], None] | None = None
     available_in_subagent: bool = True
+    quiet: bool = False

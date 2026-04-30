@@ -16,6 +16,7 @@ Work like a careful engineer:
 - use open_file to open generated local files
 - keep changes small, idiomatic, and easy to review
 - run focused tests or checks after edits when practical
+- when using todos, keep narration minimal and let the live todo panel show progress
 - be concise and report blockers directly
 """.strip()
 
@@ -30,7 +31,7 @@ def _build_system_prompt() -> str:
 SYSTEM_PROMPT = _build_system_prompt()
 
 
-def run(provider: Provider, show_thinking: bool = True, cwd: str = ".") -> str | None:
+def run(provider: Provider, show_thinking: bool = False, cwd: str = ".") -> str | None:
     """Run the TAOR loop. Returns 'login'/'logout' if the user asked, or None on quit."""
     messages: list[dict] = []
     current_tokens = 0
@@ -172,6 +173,8 @@ def _stream_one_turn(
                     thinking_open = True
                 ui.thinking_chunk(event.text)
             elif isinstance(event, TextDelta):
+                if not text_open and not event.text.strip():
+                    continue
                 if thinking_open:
                     ui.thinking_end()
                     thinking_open = False
@@ -394,4 +397,3 @@ def _format_error(exc: Exception) -> str:
             "restart with --provider ollama --model qwen3-coder:480b-cloud)."
         )
     return f"{name}: {exc}"
-

@@ -84,10 +84,15 @@ def dispatch(name: str, args: dict) -> tuple[bool, str]:
     if tool is None:
         return False, f"unknown tool: {name}"
 
-    ui.tool_call(name, _summary(tool, args))
+    quiet = tool.quiet
+    if not quiet:
+        ui.tool_call(name, _summary(tool, args))
+
     missing = _missing_required(tool, args)
     if missing:
         msg = f"missing required input: {', '.join(missing)}"
+        if quiet:
+            ui.tool_call(name, _summary(tool, args))
         ui.tool_result(False, msg)
         return False, msg
 
@@ -99,10 +104,13 @@ def dispatch(name: str, args: dict) -> tuple[bool, str]:
         out = tool.run(args)
     except Exception as e:
         msg = f"{type(e).__name__}: {e}"
+        if quiet:
+            ui.tool_call(name, _summary(tool, args))
         ui.tool_result(False, msg)
         return False, msg
 
-    ui.tool_result(True, out)
+    if not quiet:
+        ui.tool_result(True, out)
     return True, out
 
 
