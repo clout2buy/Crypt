@@ -23,12 +23,13 @@ env/
 # Editor / OS
 .idea/
 .vscode/
+.claude/
 .DS_Store
 Thumbs.db
 
 # Local-only experiments not part of Crypt itself
+scratch/
 _stage/
-super-advanced.html
 
 # User auth (already lives in ~/.crypt/, never in repo, but belt + suspenders)
 .crypt/
