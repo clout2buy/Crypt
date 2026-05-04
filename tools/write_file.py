@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import difflib
+
 from core import file_state
 
 from .fs import rel, resolve
@@ -29,6 +31,38 @@ def summary(args: dict) -> str:
     return p
 
 
+def preview(args: dict) -> str:
+    """For new files: show a head/tail snippet of the content. For
+    overwrites: show the unified diff between current and proposed."""
+    try:
+        path = resolve(args["path"])
+        new_content = str(args.get("content", ""))
+        label = rel(path)
+        if path.exists() and path.is_file():
+            try:
+                old = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                old = ""
+            diff = list(difflib.unified_diff(
+                old.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile=f"a/{label}",
+                tofile=f"b/{label}",
+                n=2,
+                lineterm="",
+            ))
+            return "".join(diff[2:]).rstrip() if diff else ""
+        # New file — render as all-additions so the diff renderer colors it.
+        lines = new_content.splitlines() or [""]
+        head = lines[:30]
+        body = "\n".join(f"+{ln}" for ln in head)
+        if len(lines) > 30:
+            body += f"\n+ ... +{len(lines) - 30} more line(s)"
+        return f"+++ b/{label}\n{body}"
+    except Exception:
+        return ""
+
+
 TOOL = Tool(
     "write_file",
     (
@@ -53,4 +87,5 @@ TOOL = Tool(
     run,
     priority=50,
     summary=summary,
+    preview=preview,
 )

@@ -937,6 +937,47 @@ def status_panel(rows: dict) -> None:
     console.print()
 
 
+def diff_preview(text: str) -> None:
+    """Render a unified diff with colored +/- lines, dimmed context.
+
+    Called by the tool dispatcher right before an approval prompt so the
+    user sees the actual change instead of just a path. Truncates long
+    diffs to ~40 visible lines with an "N more" footer."""
+    if not text:
+        return
+    lines = text.splitlines()
+    cap = 40
+    visible = lines[:cap]
+    omitted = max(0, len(lines) - cap)
+
+    head = Text("  ┐ ", style=FAINT)
+    head.append("preview", style=ALT)
+    console.print(head)
+    for line in visible:
+        if line.startswith("+++") or line.startswith("---"):
+            row = Text("  │ ", style=FAINT)
+            row.append(line, style=MUTED)
+        elif line.startswith("@@"):
+            row = Text("  │ ", style=FAINT)
+            row.append(line, style=ALT)
+        elif line.startswith("+"):
+            row = Text("  │ ", style=FAINT)
+            row.append(line, style=ACCENT)
+        elif line.startswith("-"):
+            row = Text("  │ ", style=FAINT)
+            row.append(line, style=ERR)
+        else:
+            row = Text("  │ ", style=FAINT)
+            row.append(line, style=MUTED)
+        console.print(row)
+    if omitted:
+        more = Text("  │ ", style=FAINT)
+        more.append(f"... +{omitted} more line(s)", style=FAINT)
+        console.print(more)
+    foot = Text("  ┘", style=FAINT)
+    console.print(foot)
+
+
 def subagent_start(description: str) -> None:
     _packet("AG", HOT)
     t = Text("  ")

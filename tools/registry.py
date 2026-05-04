@@ -142,6 +142,8 @@ def dispatch(name: str, args: dict, *, render: bool = True) -> tuple[bool, str]:
         if not render:
             return False, "approval required: destructive tool call unavailable in non-interactive subagent"
         reason = _danger_reason(tool, args) or "destructive operation"
+        if render:
+            _render_preview(tool, args)
         approved, feedback = ui.confirm(f"DANGER ({reason}) - run anyway?")
         if not approved:
             msg = "denied by user"
@@ -155,6 +157,8 @@ def dispatch(name: str, args: dict, *, render: bool = True) -> tuple[bool, str]:
     elif tool.permission == "ask" and not runtime.can_auto_approve(tool.name):
         if not render:
             return False, "approval required: interactive tool call unavailable in non-interactive subagent"
+        if render:
+            _render_preview(tool, args)
         approved, feedback = ui.confirm("run this?")
         if not approved:
             msg = "denied by user"
@@ -201,6 +205,19 @@ def _model_output(out):
     if isinstance(out, dict) and out.get("__crypt_tool_result__"):
         return out.get("content", "")
     return out
+
+
+def _render_preview(tool: Tool, args: dict) -> None:
+    """Show a tool-specific preview before the approval prompt. Tool's
+    preview() can raise — we never let preview problems block the prompt."""
+    if not tool.preview:
+        return
+    try:
+        text = tool.preview(args)
+    except Exception:
+        return
+    if text:
+        ui.diff_preview(text)
 
 
 def _missing_required(tool: Tool, args: dict) -> list[str]:

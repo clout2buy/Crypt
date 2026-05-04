@@ -32,6 +32,23 @@ def run(args: dict) -> str:
     if not edits:
         raise ValueError("no edits provided (need 'old'+'new' or 'edits' list)")
 
+    original, cursor, newline = compute_new_content(path, edits)
+
+    final_text = cursor.replace("\n", newline) if newline != "\n" else cursor
+    path.write_bytes(final_text.encode("utf-8"))
+    file_state.record_write(path)
+
+    diff = _short_diff(original, cursor, rel(path))
+    suffix = f"\n{diff}" if diff else ""
+    plural = "s" if len(edits) != 1 else ""
+    return f"edited {rel(path)} ({len(edits)} edit{plural}){suffix}"
+
+
+def compute_new_content(path, edits: list[tuple[str, str]]) -> tuple[str, str, str]:
+    """Pure function: read `path`, apply `edits`, return (original, new_text,
+    detected_newline). Raises ValueError if any edit doesn't match exactly
+    once. Used by run(), preview(), and multi_edit so all three see the same
+    matching/normalisation behaviour."""
     raw_bytes = path.read_bytes()
     newline = _detect_newline(raw_bytes)
     # Read with universal newlines so all matching uses '\n', regardless of
@@ -68,19 +85,9 @@ def run(args: dict) -> str:
                 f"{' (+ more)' if count > len(line_nums) else ''}\n"
                 f"   add surrounding lines to make 'old' unique"
             )
-        # Apply on both views in lock-step so positions stay aligned.
         cursor_norm = cursor_norm.replace(old_norm, new_norm, 1)
         cursor = cursor.replace(_find_real(cursor, old_norm), new_norm, 1)
-
-    # Re-apply the file's original newline style on write.
-    final_text = cursor.replace("\n", newline) if newline != "\n" else cursor
-    path.write_bytes(final_text.encode("utf-8"))
-    file_state.record_write(path)
-
-    diff = _short_diff(original, cursor, rel(path))
-    suffix = f"\n{diff}" if diff else ""
-    plural = "s" if len(edits) != 1 else ""
-    return f"edited {rel(path)} ({len(edits)} edit{plural}){suffix}"
+    return original, cursor, newline
 
 
 def _detect_newline(data: bytes) -> str:
@@ -116,6 +123,25 @@ def summary(args: dict) -> str:
         n = len(args["edits"])
         return f"{path} ({n} edit{'s' if n != 1 else ''})"
     return path
+
+
+def preview(args: dict) -> str:
+    """Compute the unified diff this edit would produce, without writing.
+
+    Side-effect-free. Returns empty string when the diff can't be computed
+    (file missing, no match, ambiguous match) so the user still sees the
+    plain approval prompt and the tool call gives the real error."""
+    try:
+        path = resolve(args["path"])
+        if not path.exists() or not is_text_file(path):
+            return ""
+        edits = _parse_edits(args)
+        if not edits:
+            return ""
+        original, cursor, _ = compute_new_content(path, edits)
+        return _short_diff(original, cursor, rel(path))
+    except Exception:
+        return ""
 
 
 def _parse_edits(args: dict) -> list[tuple[str, str]]:
@@ -207,4 +233,5 @@ TOOL = Tool(
     run,
     priority=40,
     summary=summary,
+    preview=preview,
 )

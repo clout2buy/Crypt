@@ -27,3 +27,9 @@ class Tool:
     # True only for deterministic read-only tools that can safely execute
     # beside each other when the model emits multiple tool calls in one turn.
     parallel_safe: bool = False
+    # Optional preview generator. Returns text to show the user BEFORE the
+    # approval prompt — typically a unified diff for edit/write tools so
+    # the user sees what's about to change instead of approving a blob.
+    # Should be cheap and side-effect-free. May raise; raises are swallowed
+    # by the dispatcher so the user still sees the standard prompt.
+    preview: Callable[[dict], str] | None = None
