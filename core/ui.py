@@ -341,6 +341,97 @@ def _emit_with_rail(rail: Text, ch: str, ink_style: str) -> None:
 
 
 # ─── welcome / chrome ───────────────────────────────────────────────────
+# Calvin-S box-drawing brand. Tasteful, fits the aesthetic, 3 rows × 17 cols.
+_BRAND = (
+    "  ╔═╗╦═╗╦ ╦╔═╗╔╦╗",
+    "  ║  ╠╦╝╚╦╝╠═╝ ║ ",
+    "  ╚═╝╩╚═ ╩ ╩   ╩ ",
+)
+
+# Tiny rotating welcome lines so a fresh launch feels alive without being noisy.
+_TAGLINES = (
+    "transmission console",
+    "ready when you are",
+    "local-first coding harness",
+    "TAOR loop online",
+    "tools loaded · standing by",
+    "channel open",
+)
+
+
+def _is_animated_tty() -> bool:
+    if os.environ.get("CRYPT_NO_ANIMATION"):
+        return False
+    try:
+        return bool(console.is_terminal and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _tagline() -> str:
+    # Deterministic per-launch but varies day to day so it doesn't feel repetitive.
+    idx = int(time.time() // 60) % len(_TAGLINES)
+    return _TAGLINES[idx]
+
+
+def _info_rows(
+    provider: str,
+    model: str,
+    auth_kind: str | None,
+    auth_email: str | None,
+    auth_plan: str | None,
+    cwd: str,
+) -> list[Text]:
+    friendly = _short_model(model)
+    auth_line = "no auth"
+    if auth_kind == "oauth":
+        auth_line = auth_email or "Anthropic OAuth"
+        if auth_plan:
+            auth_line += f"  ·  {auth_plan}"
+    elif auth_kind:
+        auth_line = auth_kind
+
+    link = Text("    ", style=FAINT)
+    link.append("●  ", style=ACCENT)
+    link.append("LINK   ", style=MUTED)
+    link.append(friendly, style=f"bold {INK}")
+    link.append(" via ", style=FAINT)
+    link.append(provider, style=MUTED)
+
+    auth = Text("    ", style=FAINT)
+    auth.append("◌  ", style=MUTED)
+    auth.append("AUTH   ", style=MUTED)
+    auth.append(auth_line, style=INK)
+
+    cwd_row = Text("    ", style=FAINT)
+    cwd_row.append("▸  ", style=MUTED)
+    cwd_row.append("CWD    ", style=MUTED)
+    cwd_row.append(_short_path(cwd, 60), style=INK)
+
+    tools_row = Text("    ", style=FAINT)
+    tools_row.append("▰  ", style=ACCENT)
+    tools_row.append("TOOLS  ", style=MUTED)
+    tools_row.append(f"{_tool_count()} loaded", style=INK)
+    tools_row.append("   /status for details", style=FAINT)
+
+    return [link, auth, cwd_row, tools_row]
+
+
+def _brand_frame(reveal: int, scan_row: int | None) -> Group:
+    """Render the brand at frame `reveal`. Lines 0..reveal are bright; the
+    line at scan_row glows brightest (the scanline)."""
+    rows: list[Text] = []
+    for i, line in enumerate(_BRAND):
+        if i == scan_row:
+            t = Text(line, style=f"bold {ACCENT} {ACCENT_BG}")
+        elif i <= reveal:
+            t = Text(line, style=f"bold {ACCENT}")
+        else:
+            t = Text(line, style=FAINT)
+        rows.append(t)
+    return Group(*rows)
+
+
 def welcome(
     provider: str,
     model: str,
@@ -349,71 +440,68 @@ def welcome(
     auth_plan: str | None = None,
     cwd: str = ".",
 ) -> None:
-    friendly = _short_model(model)
-
-    auth_line = "no auth"
-    if auth_kind == "oauth":
-        auth_line = auth_email or "Claude OAuth"
-        if auth_plan:
-            auth_line += f"  ·  {auth_plan}"
-    elif auth_kind:
-        auth_line = auth_kind
-
+    rows = _info_rows(provider, model, auth_kind, auth_email, auth_plan, cwd)
     width = console.size.width
 
-    # top edge with logo
-    top = Text("  ╭─", style=FAINT)
-    top.append(" CRYPT ", style=f"bold {ACCENT}")
-    top.append("── ", style=FAINT)
-    top.append("transmission console ", style=MUTED)
-    top.append("── ", style=FAINT)
-    rule_w = max(2, width - len(top.plain) - 2)
-    top.append("─" * rule_w, style=FAINT)
-
-    # info rows
-    link = Text("  │  ", style=FAINT)
-    link.append("●", style=ACCENT)
-    link.append("  ")
-    link.append("LINK   ", style=MUTED)
-    link.append(friendly, style=f"bold {INK}")
-    link.append(" via ", style=FAINT)
-    link.append(provider, style=MUTED)
-
-    auth = Text("  │       ", style=FAINT)
-    auth.append(auth_line, style=MUTED)
-
-    cwd_row = Text("  │  ", style=FAINT)
-    cwd_row.append("◌", style=MUTED)
-    cwd_row.append("  ")
-    cwd_row.append("CWD    ", style=MUTED)
-    cwd_row.append(_short_path(cwd, 60), style=INK)
-
-    tools_row = Text("  │  ", style=FAINT)
-    tools_row.append("▰", style=ACCENT)
-    tools_row.append("  ")
-    tools_row.append("TOOLS  ", style=MUTED)
-    tools_row.append(f"{_tool_count()} loaded", style=INK)
-    tools_row.append("  ·  /status for details", style=FAINT)
-
-    bottom = Text("  ╰─", style=FAINT)
-    bottom.append("─" * max(2, width - 2), style=FAINT)
+    tag = Text("  ", style=FAINT)
+    tag.append("─ ", style=FAINT)
+    tag.append(_tagline(), style=MUTED)
+    tag.append(" ", style=FAINT)
+    tag.append("─" * max(2, width - len(tag.plain) - 2), style=FAINT)
 
     cmds = Text("  ▸  ", style=ACCENT)
     sep = Text("  ·  ", style=FAINT)
-    for i, cmd in enumerate(("/help", "/status", "/login", "/logout", "/quit")):
+    for i, cmd in enumerate(("/help", "/status", "/model", "/yolo", "/quit")):
         if i:
             cmds.append_text(sep)
         cmds.append(cmd, style=MUTED)
 
+    hint = Text("  ", style=FAINT)
+    hint.append("type a request to begin · ", style=FAINT)
+    hint.append("Ctrl+C", style=MUTED)
+    hint.append(" interrupts a turn", style=FAINT)
+
     console.print()
-    console.print(top)
-    console.print(link)
-    console.print(auth)
-    console.print(cwd_row)
-    console.print(tools_row)
-    console.print(bottom)
+
+    if not _is_animated_tty():
+        # Headless / piped: skip animation entirely.
+        console.print(_brand_frame(reveal=len(_BRAND) - 1, scan_row=None))
+        console.print()
+        for row in rows:
+            console.print(row)
+        console.print()
+        console.print(tag)
+        console.print()
+        console.print(cmds)
+        console.print()
+        console.print(hint)
+        console.print()
+        return
+
+    # Scanline reveal: brand fades in row-by-row with a brighter "scan"
+    # row riding the wavefront. ~210ms total, easy to tolerate.
+    with Live(
+        _brand_frame(reveal=-1, scan_row=None),
+        console=console,
+        refresh_per_second=30,
+        transient=False,
+    ) as live:
+        for i in range(len(_BRAND)):
+            live.update(_brand_frame(reveal=i, scan_row=i))
+            time.sleep(0.07)
+        live.update(_brand_frame(reveal=len(_BRAND) - 1, scan_row=None))
+
+    # Materialize info rows with a tiny stagger so the eye tracks them.
+    console.print()
+    for row in rows:
+        console.print(row)
+        time.sleep(0.045)
+    console.print()
+    console.print(tag)
     console.print()
     console.print(cmds)
+    console.print()
+    console.print(hint)
     console.print()
 
 
@@ -501,13 +589,47 @@ def _drain_buffered_lines(timeout_ms: int = 80) -> list[str]:
     return lines
 
 
-def user_prompt(yolo: bool = False) -> str:
+def _terminal_width() -> int:
+    try:
+        return max(20, console.size.width)
+    except Exception:
+        return 80
+
+
+def _erase_recent_input_echo(lines: list[str], prompt_width: int = 8) -> None:
+    """Best-effort cleanup for huge pasted input.
+
+    Standard terminal input echoes pasted text before Python receives it. For
+    long prompts that wrap badly, clear the echoed rows and replace them with a
+    compact paste summary.
+    """
+    width = _terminal_width()
+    rows = 0
+    for i, line in enumerate(lines):
+        prefix = prompt_width if i == 0 else 0
+        rows += max(1, (prefix + len(line)) // width + 1)
+    rows = max(1, min(rows, 80))
+    sys.stdout.write(f"\x1b[{rows}A")
+    for i in range(rows):
+        sys.stdout.write("\x1b[2K")
+        if i < rows - 1:
+            sys.stdout.write("\x1b[1B")
+    if rows > 1:
+        sys.stdout.write(f"\x1b[{rows - 1}A")
+    sys.stdout.flush()
+
+
+def user_prompt(yolo: bool = False, approval: str = "manual") -> str:
     width = console.size.width
     sep = Text("  ╶" + "─" * max(2, width - 4), style=FAINT)
     console.print(sep)
 
-    bg = ERR_BG if yolo else INPUT_BG
-    fg = ERR if yolo else ACCENT
+    if yolo or approval == "yolo-all":
+        bg, fg = ERR_BG, ERR
+    elif approval == "auto-edits":
+        bg, fg = WARN_BG, WARN
+    else:
+        bg, fg = INPUT_BG, ACCENT
     prompt_text = Text("  ")
     prompt_text.append(" >> ", style=f"bold {fg} {bg}")
     prompt_text.append("  ")
@@ -520,12 +642,15 @@ def user_prompt(yolo: bool = False) -> str:
             return "/quit"
         extras = _drain_buffered_lines(80)
 
-    if extras:
+    is_large = extras or len(first) > 220
+    if is_large:
         # Multi-line paste detected — assemble the full message and show a
         # compact placeholder so the scrollback isn't flooded by the paste.
-        full = (first + "\n" + "\n".join(extras)).strip()
+        lines = [first, *extras]
+        _erase_recent_input_echo(lines)
+        full = "\n".join(lines).strip()
         total_lines = 1 + len(extras)
-        non_empty_chars = sum(len(line) for line in [first, *extras])
+        non_empty_chars = sum(len(line) for line in lines)
         placeholder = Text("  ")
         placeholder.append(
             f"[{total_lines} lines · {non_empty_chars} chars pasted]",
@@ -537,16 +662,26 @@ def user_prompt(yolo: bool = False) -> str:
 
 
 def ask(question: str) -> bool:
+    approved, _ = confirm(question)
+    return approved
+
+
+def confirm(question: str) -> tuple[bool, str]:
     q = Text("  ? ", style=f"bold {WARN}")
     q.append(question, style=INK)
-    q.append("  (y/N) ", style=MUTED)
+    q.append("  (y/N, or type feedback) ", style=MUTED)
     with _suspend_live():
         try:
-            ans = console.input(q).strip().lower()
+            ans = console.input(q).strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
-            return False
-    return ans in ("y", "yes")
+            return False, ""
+    normalized = ans.lower()
+    if normalized in ("y", "yes"):
+        return True, ""
+    if normalized in ("", "n", "no"):
+        return False, ""
+    return False, ans
 
 
 def ask_choice(question: str, options: list[str]) -> str:
@@ -828,6 +963,7 @@ def footer(
     session_tokens: int,
     cwd: str,
     yolo: bool = False,
+    approval: str = "manual",
 ) -> None:
     friendly = _short_model(model)
     bar_w = 10
@@ -840,7 +976,10 @@ def footer(
     t.append("STA", style=MUTED)
     t.append(" · ", style=FAINT)
     t.append(friendly, style=MUTED)
-    if yolo:
+    if approval == "auto-edits":
+        t.append(" · ", style=FAINT)
+        t.append(" AUTO-EDITS ", style=f"bold {WARN} {WARN_BG}")
+    elif yolo or approval == "yolo-all":
         t.append(" · ", style=FAINT)
         t.append(" YOLO ", style=f"bold {ERR} {ERR_BG}")
     t.append(" · ", style=FAINT)
