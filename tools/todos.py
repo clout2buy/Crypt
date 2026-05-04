@@ -163,4 +163,5 @@ TOOL = Tool(
     before_prompt=before_prompt,
     reset=clear,
     quiet=True,
+    available_in_subagent=False,
 )

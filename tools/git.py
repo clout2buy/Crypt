@@ -96,4 +96,5 @@ TOOL = Tool(
     run,
     priority=35,
     summary=summary,
+    parallel_safe=True,
 )

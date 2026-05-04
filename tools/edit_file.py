@@ -2,8 +2,22 @@ from __future__ import annotations
 
 import difflib
 
+from core import file_state
+
 from .fs import is_text_file, rel, resolve
 from .types import Tool
+
+
+# Models often emit smart/curly quotes when copying content into tool calls.
+# We normalize both the file text AND the search/replace strings to plain
+# ASCII quotes for matching, then restore the file's original style on write.
+_CURLY_TO_STRAIGHT = str.maketrans({
+    "‘": "'", "’": "'",  # ' '
+    "“": '"', "”": '"',  # " "
+    "′": "'", "″": '"',  # ′ ″ (primes)
+    "–": "-", "—": "-",  # – —
+    " ": " ",                  # non-breaking space
+})
 
 
 def run(args: dict) -> str:
@@ -12,27 +26,41 @@ def run(args: dict) -> str:
         raise FileNotFoundError(rel(path))
     if not is_text_file(path):
         raise ValueError(f"refusing to edit binary file: {rel(path)}")
+    file_state.assert_fresh_for_edit(path)
 
     edits = _parse_edits(args)
     if not edits:
         raise ValueError("no edits provided (need 'old'+'new' or 'edits' list)")
 
-    original = path.read_text(encoding="utf-8")
+    raw_bytes = path.read_bytes()
+    newline = _detect_newline(raw_bytes)
+    # Read with universal newlines so all matching uses '\n', regardless of
+    # whether the file is CRLF (Windows) or LF (Unix). We re-apply the
+    # original newline style on write so we don't churn line endings.
+    original = raw_bytes.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    normalized_original = original.translate(_CURLY_TO_STRAIGHT)
 
-    # Validate every edit on the same starting text, applying as we go,
-    # so multi-edit batches are atomic — either all apply or none do.
     cursor = original
+    cursor_norm = normalized_original
     for i, (old, new) in enumerate(edits, 1):
         if not old:
-            raise ValueError(f"edit {i}: 'old' cannot be empty")
-        count = cursor.count(old)
+            if cursor == "":
+                cursor = new
+                cursor_norm = new.translate(_CURLY_TO_STRAIGHT)
+                continue
+            raise ValueError(f"edit {i}: 'old' cannot be empty unless the file is empty")
+
+        old_norm = old.replace("\r\n", "\n").replace("\r", "\n").translate(_CURLY_TO_STRAIGHT)
+        new_norm = new.replace("\r\n", "\n").replace("\r", "\n")
+
+        count = cursor_norm.count(old_norm)
         if count == 0:
             raise ValueError(
                 f"edit {i}: no match for {_preview(old)}\n"
-                f"   {_no_match_hint(cursor, old)}"
+                f"   {_no_match_hint(cursor_norm, old_norm)}"
             )
         if count > 1:
-            line_nums = _line_numbers_for(cursor, old, limit=5)
+            line_nums = _line_numbers_for(cursor_norm, old_norm, limit=5)
             raise ValueError(
                 f"edit {i}: {count} matches for {_preview(old)}\n"
                 f"   matched on line{'s' if len(line_nums) != 1 else ''} "
@@ -40,14 +68,46 @@ def run(args: dict) -> str:
                 f"{' (+ more)' if count > len(line_nums) else ''}\n"
                 f"   add surrounding lines to make 'old' unique"
             )
-        cursor = cursor.replace(old, new, 1)
+        # Apply on both views in lock-step so positions stay aligned.
+        cursor_norm = cursor_norm.replace(old_norm, new_norm, 1)
+        cursor = cursor.replace(_find_real(cursor, old_norm), new_norm, 1)
 
-    path.write_text(cursor, encoding="utf-8")
+    # Re-apply the file's original newline style on write.
+    final_text = cursor.replace("\n", newline) if newline != "\n" else cursor
+    path.write_bytes(final_text.encode("utf-8"))
+    file_state.record_write(path)
 
     diff = _short_diff(original, cursor, rel(path))
     suffix = f"\n{diff}" if diff else ""
     plural = "s" if len(edits) != 1 else ""
     return f"edited {rel(path)} ({len(edits)} edit{plural}){suffix}"
+
+
+def _detect_newline(data: bytes) -> str:
+    """Return the dominant line ending in `data` ('\\r\\n', '\\r', or '\\n')."""
+    crlf = data.count(b"\r\n")
+    cr = data.count(b"\r") - crlf
+    lf = data.count(b"\n") - crlf
+    counts = {"\r\n": crlf, "\r": cr, "\n": lf}
+    best = max(counts, key=lambda k: counts[k])
+    return best if counts[best] else "\n"
+
+
+def _find_real(text: str, normalized_needle: str) -> str:
+    """Map a normalized needle back to the actual text in `text`.
+
+    Models sometimes pass straight quotes for content that uses curly quotes
+    in the file, or vice versa. After we found a hit on the *normalized*
+    text, we need to replace the *real* substring at that position so the
+    file isn't silently rewritten to ASCII-only.
+    """
+    norm = text.translate(_CURLY_TO_STRAIGHT)
+    idx = norm.find(normalized_needle)
+    if idx < 0:
+        # Shouldn't happen — caller already counted >0 matches in the normalized
+        # view — but if it does, fall back to the literal needle.
+        return normalized_needle
+    return text[idx:idx + len(normalized_needle)]
 
 
 def summary(args: dict) -> str:
@@ -119,6 +179,7 @@ TOOL = Tool(
         "Edit one existing file by replacing exact substrings. Provide either "
         "`old`+`new` for a single edit or `edits: [{old, new}, ...]` for an atomic batch. "
         "All replacements must match exactly once across the file. "
+        "If the target file is empty, `old` may be an empty string to fill it. "
         "Returns a unified diff snippet on success."
     ),
     {

@@ -58,16 +58,21 @@ def run(args: dict) -> str:
     prompt = str(args.get("prompt", "")).strip()
     if not prompt:
         return "spawn_agent: prompt is required"
+    context = str(args.get("context", "")).strip() or None
 
-    ui.subagent_start(description)
+    render = runtime.render_tools()
+    if render:
+        ui.subagent_start(description)
     try:
-        output = runtime.run_subagent(prompt)
+        output = runtime.run_subagent(prompt, context=context)
     except Exception as e:
-        ui.subagent_end(False, description)
+        if render:
+            ui.subagent_end(False, description)
         return f"subagent error: {type(e).__name__}: {e}"
 
     ok = not output.startswith("spawn_agent unavailable")
-    ui.subagent_end(ok, description)
+    if render:
+        ui.subagent_end(ok, description)
     return output or "(no output)"
 
 
@@ -93,6 +98,15 @@ TOOL = Tool(
                 "type": "string",
                 "description": "Self-contained briefing with scope and expected report.",
             },
+            "context": {
+                "type": "string",
+                "description": (
+                    "Optional excerpts you (the parent) already gathered — "
+                    "file snippets, prior findings, key decisions. Saves the "
+                    "subagent from re-reading what you already know. Plain "
+                    "text; cite paths inline."
+                ),
+            },
         },
         "required": ["description", "prompt"],
     },
@@ -102,4 +116,5 @@ TOOL = Tool(
     priority=110,
     summary=summary,
     available_in_subagent=False,
+    parallel_safe=True,
 )

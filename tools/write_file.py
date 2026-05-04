@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from core import file_state
+
 from .fs import rel, resolve
 from .types import Tool
 
@@ -12,8 +14,11 @@ def run(args: dict) -> str:
         raise FileExistsError(
             "file exists; pass overwrite=true to replace it, or use edit_file"
         )
+    if existed:
+        file_state.assert_fresh_for_edit(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(args["content"], encoding="utf-8")
+    file_state.record_write(path)
     return f"{'overwrote' if existed else 'created'} {rel(path)}"
 
 

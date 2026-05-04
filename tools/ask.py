@@ -84,4 +84,5 @@ TOOL = Tool(
     prompt=PROMPT,
     priority=100,
     summary=summary,
+    available_in_subagent=False,
 )

@@ -63,11 +63,14 @@ def run(args: dict) -> str:
         return "present_plan: plan is required"
 
     ui.plan_panel(title, plan)
-    if runtime.yolo():
-        ui.info("yolo on - auto-approving plan")
+    if runtime.can_auto_approve_plan():
+        ui.info("approval mode yolo-all - auto-approving plan")
         return "approved. proceed with execution."
-    if ui.ask("approve this plan and proceed?"):
+    approved, inline_feedback = ui.confirm("approve this plan and proceed?")
+    if approved:
         return "approved. proceed with execution."
+    if inline_feedback:
+        return f"rejected. user feedback: {inline_feedback}"
 
     feedback = ui.feedback_prompt()
     if not feedback:
@@ -104,4 +107,5 @@ TOOL = Tool(
     prompt=PROMPT,
     priority=90,
     summary=summary,
+    available_in_subagent=False,
 )
