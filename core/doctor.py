@@ -1,0 +1,265 @@
+"""Local harness self-checks for Crypt."""
+from __future__ import annotations
+
+import os
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from tools import REGISTRY
+
+from . import background, file_state, prompt, redact, session
+
+
+FORBIDDEN_IDENTITY = ("Claude " + "Code", "Claude " + "OAuth", "claude" + "-cli")
+
+
+@dataclass
+class Check:
+    name: str
+    ok: bool
+    detail: str = ""
+
+
+def run_doctor(cwd: str | Path) -> str:
+    cwd = Path(cwd).resolve()
+    checks = [
+        _check_prompt(cwd),
+        _check_registry(),
+        _check_tool_load_failures(),
+        _check_session(),
+        _check_file_state(),
+        _check_background(),
+        _check_redaction(),
+        _check_identity_strings(cwd),
+        _check_ripgrep(),
+        _check_app_dir_writable(),
+        _check_known_model(),
+    ]
+    passed = sum(1 for c in checks if c.ok)
+    lines = [f"Crypt doctor: {passed}/{len(checks)} checks passed"]
+    for check in checks:
+        mark = "OK" if check.ok else "FAIL"
+        suffix = f" - {check.detail}" if check.detail else ""
+        lines.append(f"[{mark}] {check.name}{suffix}")
+    return "\n".join(lines)
+
+
+def _check_prompt(cwd: Path) -> Check:
+    try:
+        text = prompt.build_system_prompt(
+            provider_name="doctor",
+            model="doctor",
+            cwd=str(cwd),
+            tool_guidance="",
+        )
+        if "You are Crypt" not in text:
+            return Check("prompt identity", False, "missing Crypt identity")
+        bad = [s for s in FORBIDDEN_IDENTITY if s.lower() in text.lower()]
+        if bad:
+            return Check("prompt identity", False, f"forbidden string: {bad[0]}")
+        return Check("prompt identity", True)
+    except Exception as e:
+        return Check("prompt identity", False, f"{type(e).__name__}: {e}")
+
+
+def _check_registry() -> Check:
+    try:
+        names = [item["name"] for item in REGISTRY.schemas()]
+        sub = [item["name"] for item in REGISTRY.schemas(for_subagent=True)]
+        required = {"read_file", "edit_file", "bash_start", "web_fetch", "spawn_agent"}
+        missing = sorted(required - set(names))
+        if missing:
+            return Check("tool registry", False, "missing " + ", ".join(missing))
+        disallowed = {"edit_file", "write_file", "bash", "ask_user", "present_plan"} & set(sub)
+        if disallowed:
+            return Check("subagent tool boundary", False, "leaks " + ", ".join(sorted(disallowed)))
+        return Check("tool registry", True, f"{len(names)} tools, {len(sub)} subagent tools")
+    except Exception as e:
+        return Check("tool registry", False, f"{type(e).__name__}: {e}")
+
+
+def _check_session() -> Check:
+    try:
+        with tempfile.TemporaryDirectory(prefix="crypt-doctor-session-") as td:
+            s = session.Session(td, provider="doctor", model="doctor")
+            s.record_message({"role": "user", "content": "doctor user"})
+            s.record_message({"role": "assistant", "content": [{"type": "text", "text": "doctor assistant"}]})
+            loaded = s.load_messages()
+            ok = len(loaded) == 2 and loaded[0]["content"] == "doctor user"
+            path = s.path
+            try:
+                path.unlink(missing_ok=True)
+                path.parent.rmdir()
+            except OSError:
+                pass
+            return Check("session persistence", ok, str(path) if ok else "replay mismatch")
+    except Exception as e:
+        return Check("session persistence", False, f"{type(e).__name__}: {e}")
+
+
+def _check_file_state() -> Check:
+    try:
+        with tempfile.TemporaryDirectory(prefix="crypt-doctor-file-") as td:
+            path = Path(td) / "sample.txt"
+            path.write_text("alpha\n", encoding="utf-8")
+            file_state.clear()
+            try:
+                file_state.assert_fresh_for_edit(path)
+                return Check("read-before-edit", False, "unread file was accepted")
+            except PermissionError:
+                pass
+            data = path.read_bytes()
+            file_state.record_read(path, data)
+            file_state.assert_fresh_for_edit(path)
+            path.write_text("beta gamma\n", encoding="utf-8")
+            try:
+                file_state.assert_fresh_for_edit(path)
+                return Check("stale-file protection", False, "changed file was accepted")
+            except RuntimeError:
+                pass
+            return Check("read-before-edit", True)
+    except Exception as e:
+        return Check("read-before-edit", False, f"{type(e).__name__}: {e}")
+    finally:
+        file_state.clear()
+
+
+def _check_background() -> Check:
+    try:
+        with tempfile.TemporaryDirectory(prefix="crypt-doctor-bg-") as td:
+            job = background.start('python -c "print(12345)"', cwd=td, description="doctor")
+            deadline = time.time() + 5
+            while time.time() < deadline and job.process.poll() is None:
+                time.sleep(0.05)
+            if job.process.poll() is None:
+                background.kill(job.id)
+                try:
+                    job.output_path.unlink(missing_ok=True)
+                    job.output_path.parent.rmdir()
+                except OSError:
+                    pass
+                background.forget(job.id)
+                return Check("background jobs", False, "job did not exit")
+            out = background.poll(job.id, tail_lines=20)
+            try:
+                job.output_path.unlink(missing_ok=True)
+                job.output_path.parent.rmdir()
+            except OSError:
+                pass
+            background.forget(job.id)
+            return Check("background jobs", "12345" in out, f"job {job.id}")
+    except Exception as e:
+        return Check("background jobs", False, f"{type(e).__name__}: {e}")
+
+
+def _check_redaction() -> Check:
+    name = "CRYPT_DOCTOR_TOKEN"
+    value = "doctor-secret-value-12345"
+    old = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        cleaned = redact.text(f"token={value}")
+        return Check("secret redaction", value not in cleaned)
+    except Exception as e:
+        return Check("secret redaction", False, f"{type(e).__name__}: {e}")
+    finally:
+        if old is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = old
+
+
+def _check_identity_strings(cwd: Path) -> Check:
+    """Scan only user-facing files (README + main.py) for forbidden identity
+    strings. The system prompt is checked separately by _check_prompt. Code
+    comments that cite reference implementations as a design source are fine
+    — that's attribution, not impersonation."""
+    try:
+        targets = [cwd / "README.md", cwd / "main.py"]
+        hits: list[str] = []
+        for target in targets:
+            if target.is_file():
+                _scan_file(target, hits)
+            if hits:
+                break
+        if hits:
+            return Check("Crypt-facing identity strings", False, hits[0])
+        return Check("Crypt-facing identity strings", True)
+    except Exception as e:
+        return Check("Crypt-facing identity strings", False, f"{type(e).__name__}: {e}")
+
+
+def _check_tool_load_failures() -> Check:
+    failures = REGISTRY.load_failures()
+    if not failures:
+        return Check("tool load", True, "all tool modules imported")
+    detail = "; ".join(f"{name}: {err}" for name, err in failures[:3])
+    if len(failures) > 3:
+        detail += f"; (+{len(failures) - 3} more)"
+    return Check("tool load", False, detail)
+
+
+def _check_ripgrep() -> Check:
+    import shutil
+
+    rg = shutil.which("rg")
+    if rg:
+        return Check("ripgrep (rg)", True, rg)
+    # Soft warning — Python fallback exists. Surface as a non-blocking note.
+    return Check(
+        "ripgrep (rg)",
+        True,
+        "not found; grep falls back to Python (slower on large repos)",
+    )
+
+
+def _check_app_dir_writable() -> Check:
+    from .settings import APP_DIR
+
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        probe = APP_DIR / ".doctor-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return Check("app dir writable", True, str(APP_DIR))
+    except OSError as e:
+        return Check("app dir writable", False, f"{APP_DIR}: {e}")
+
+
+def _check_known_model() -> Check:
+    """Best-effort: warn if the configured Anthropic model isn't in the
+    known list. Avoids the 'I configured an old model and got a 404 in
+    week 3' failure mode."""
+    from .settings import (
+        ANTHROPIC_MODELS,
+        OLLAMA_MODELS,
+        load_config,
+        provider_default,
+        model_default,
+    )
+
+    saved = load_config()
+    provider = provider_default(saved)
+    model = model_default(provider, saved)
+    known = ANTHROPIC_MODELS if provider == "anthropic" else OLLAMA_MODELS
+    if model in known:
+        return Check("model is known", True, f"{provider}:{model}")
+    return Check(
+        "model is known",
+        True,
+        f"{provider}:{model} not in known list (may still work; update settings.py if it does)",
+    )
+
+
+def _scan_file(path: Path, hits: list[str]) -> None:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    low = text.lower()
+    for needle in FORBIDDEN_IDENTITY:
+        if needle.lower() in low:
+            hits.append(f"{path}:{needle}")
+            return
