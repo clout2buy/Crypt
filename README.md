@@ -22,6 +22,15 @@ python main.py login
 python main.py --provider anthropic --model claude-opus-4-7
 ```
 
+OpenAI (or any OpenAI-compatible endpoint — Together, Fireworks, LM Studio, vLLM):
+
+```bash
+set OPENAI_API_KEY=...
+# Optional: point at a compatible server instead of api.openai.com
+set OPENAI_BASE_URL=https://api.together.xyz/v1
+python main.py --provider openai --model gpt-5
+```
+
 Ollama Cloud:
 
 ```bash
@@ -62,7 +71,7 @@ backend is in use.
 Crypt loads tools dynamically from `tools/*.py`.
 
 - `read_file`, `read_media`, `list_files`, `glob`, `grep`
-- `edit_file`, `write_file`
+- `edit_file`, `multi_edit`, `write_file`
 - `bash`, `bash_start`, `bash_poll`, `bash_kill`
 - `git`, `git_branch`, `git_stage`, `git_commit`
 - `web_search`, `web_fetch`
@@ -76,6 +85,34 @@ larger spills to `~/.crypt/runs/<timestamp>-<id>.log` and the path is
 returned in the result so the model can grep or tail it without re-running
 the command. This stops a single noisy build from draining the context
 window in one tool call.
+
+When a command fails with no captured output (common on Windows when
+`2>nul` swallows the error, or when a POSIX command like `wc` isn't
+installed), Crypt adds a `[hint: ...]` line diagnosing the likely cause
+so the model can self-correct without burning a turn on guessing.
+
+### Multi-File Edits
+
+`multi_edit` applies edits across one or more files atomically. All edits
+are validated dry-run first; if any single edit fails (no match, ambiguous
+match, missing file), nothing is written. Use it for renames, type-narrowing
+sweeps, or any change where partial application would leave the project
+broken.
+
+### Edit Approval
+
+In manual approval mode, `edit_file`, `multi_edit`, and `write_file` show
+a unified-diff preview before asking for approval, so you see what's about
+to change instead of approving a path. The same renderer applies to any
+tool that exposes a `preview()` method.
+
+### Web Fetch Sandbox
+
+`web_fetch` refuses to hit private or loopback addresses (RFC1918, link-
+local, reserved). Set `CRYPT_WEB_ALLOW_PRIVATE=1` to override (rare). For
+finer-grained control, set `CRYPT_WEB_ALLOWED_HOSTS` (comma-separated, with
+`*.example.com` wildcards) or `CRYPT_WEB_DENIED_HOSTS`. Allow rules are
+enforced as an allowlist when set; deny rules always apply.
 
 ### Subagents
 
@@ -172,6 +209,20 @@ core/
 tools/
   *.py               one tool per file, auto-registered
 ```
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite covers the load-bearing pieces: full + micro compaction,
+permission rule grammar, read-before-edit invariants, registry dispatch
+(allow/deny/classify), edit_file matching and atomic batches, multi_edit
+all-or-nothing semantics, bash output cap and diagnostics, and web_fetch
+sandbox. Add tests alongside any new core/* or tools/* logic — the doctor
+is a smoke check, not coverage.
 
 ## Files Crypt Writes
 
