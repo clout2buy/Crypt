@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import time
 import uuid
@@ -23,20 +24,59 @@ _NO_MATCH_OK = re.compile(r"^\s*(grep|egrep|fgrep|rg|ack|find|locate)\b")
 _STREAM_CAP = 30_000
 _SPILL_DIR = Path.home() / ".crypt" / "runs"
 
+# POSIX command -> Windows cmd equivalent. Used to warn the model when it
+# uses a Unix verb on cmd.exe so it can re-issue the right command without
+# burning a turn on a cryptic "(no output)" failure.
+_POSIX_HINTS = {
+    "wc": "use PowerShell: `(Get-Content file).Count` or `Get-ChildItem ... | Measure-Object -Line`",
+    "ls": "use `dir` (cmd) or `Get-ChildItem` (PowerShell)",
+    "cat": "use `type` (cmd) or `Get-Content` (PowerShell)",
+    "grep": "use `findstr` (cmd) or `Select-String` (PowerShell), or install ripgrep",
+    "head": "use `more` (cmd) or `Get-Content -Head N` (PowerShell)",
+    "tail": "use `Get-Content -Tail N` (PowerShell)",
+    "which": "use `where` (cmd) or `Get-Command` (PowerShell)",
+    "rm": "use `del` / `rmdir /s` (cmd) or `Remove-Item` (PowerShell)",
+    "mv": "use `move` / `ren` (cmd) or `Move-Item` (PowerShell)",
+    "cp": "use `copy` (cmd) or `Copy-Item` (PowerShell)",
+    "touch": "use `type nul > file` (cmd) or `New-Item file` (PowerShell)",
+    "df": "use `Get-PSDrive` (PowerShell)",
+    "du": "use `Get-ChildItem ... | Measure-Object -Sum Length` (PowerShell)",
+    "ps": "use `tasklist` (cmd) or `Get-Process` (PowerShell)",
+    "kill": "use `taskkill` (cmd) or `Stop-Process` (PowerShell)",
+    "uname": "use `systeminfo` (cmd) or `$PSVersionTable` (PowerShell)",
+    "env": "use `set` (cmd) or `Get-ChildItem env:` (PowerShell)",
+    "export": "use `set VAR=value` (cmd) or `$env:VAR='value'` (PowerShell)",
+    "sed": "use `(Get-Content file) -replace 'old','new' | Set-Content file` (PowerShell), or use edit_file",
+    "awk": "use PowerShell pipelines, or use grep + python",
+    "true": "use `cmd /c exit 0` or `$true` (PowerShell)",
+    "false": "use `cmd /c exit 1` or `$false` (PowerShell)",
+}
+
+# Glob-bearing characters cmd.exe never expands. If the model writes a
+# command with these AND a verb like wc/cat/grep that needs them expanded,
+# we know cmd.exe will pass the literal `*` to the program and it will fail.
+_GLOB_HINT_RE = re.compile(r"[*?]")
+
 
 def run(args: dict) -> str:
     command = args["command"]
-    r = subprocess.run(
-        command,
-        shell=True,
-        cwd=root(),
-        capture_output=True,
-        encoding="utf-8",
-        errors="replace",
-        text=True,
-        # Default 30s, capped at 10 minutes so `pip install` and friends fit.
-        timeout=int_arg(args, "timeout", 30, 600),
-    )
+    try:
+        r = subprocess.run(
+            command,
+            shell=True,
+            cwd=root(),
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            text=True,
+            # Default 30s, capped at 10 minutes so `pip install` and friends fit.
+            timeout=int_arg(args, "timeout", 30, 600),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"command timed out after {e.timeout}s. "
+            f"Re-run with a larger `timeout` arg, or use bash_start for long jobs."
+        ) from None
 
     body, spill = _format_output(command, r.stdout or "", r.stderr or "")
 
@@ -46,10 +86,53 @@ def run(args: dict) -> str:
         if r.returncode == 1 and _NO_MATCH_OK.match(command):
             return body if body != "(no output)" else "(no matches)"
         # Errors: full body (already capped + spilled) so the model sees what
-        # was attempted AND the failure message.
+        # was attempted AND the failure message. Add diagnosis hints so a
+        # cryptic "(no output)" exit becomes actionable.
+        hint = _diagnose_failure(command, r.returncode, r.stdout or "", r.stderr or "")
         suffix = f"\n[full output: {spill}]" if spill else ""
-        raise RuntimeError(f"exit {r.returncode}\n{body}{suffix}")
+        msg = f"exit {r.returncode}\n{body}{suffix}"
+        if hint:
+            msg += f"\n[hint: {hint}]"
+        raise RuntimeError(msg)
     return body
+
+
+def _diagnose_failure(command: str, returncode: int, stdout: str, stderr: str) -> str:
+    """Best-effort hint when the failure has no useful output. Always returns
+    a string ('' if nothing helpful to say) — never raises."""
+    try:
+        captured = (stdout + stderr).strip()
+        first_word = re.match(r"^\s*([A-Za-z_][\w.-]*)", command)
+        verb = (first_word.group(1) if first_word else "").lower()
+
+        # Windows + POSIX verb mismatch is the most common cause of
+        # "(no output) exit 1" we'll ever see.
+        if os.name == "nt" and verb in _POSIX_HINTS:
+            installed = shutil.which(verb)
+            if not installed:
+                return f"`{verb}` is a POSIX command not installed on this Windows shell. {_POSIX_HINTS[verb]}"
+            if _GLOB_HINT_RE.search(command):
+                return (
+                    f"`{verb}` is installed, but cmd.exe does not expand globs (*). "
+                    f"Wrap the command in `bash -c '...'` if Git Bash is on PATH, "
+                    f"or use PowerShell: {_POSIX_HINTS[verb]}"
+                )
+
+        # Generic empty-output diagnosis.
+        if not captured:
+            redirect = re.search(r"\b2>\s*(?:nul|/dev/null|&1)?", command)
+            if redirect:
+                return (
+                    "command exited non-zero with no captured output because stderr "
+                    "was redirected (2>nul or 2>/dev/null). Drop the redirect to see why."
+                )
+            if os.name == "nt" and verb and not shutil.which(verb):
+                return f"`{verb}` was not found on PATH. Check spelling or use a PowerShell equivalent."
+            if verb and not shutil.which(verb):
+                return f"`{verb}` was not found on PATH. Check spelling or install it."
+        return ""
+    except Exception:
+        return ""
 
 
 def _format_output(command: str, stdout: str, stderr: str) -> tuple[str, str]:
@@ -140,6 +223,21 @@ For shell work. Crypt classifies commands at runtime:
   in yolo. Don't try to outsmart this — use the dedicated tools when they
   exist (`edit_file` instead of `sed -i`, etc.).
 - `grep`/`find` returning exit 1 means "no matches" — that's success.
+
+## Platform notes
+
+On Windows, `bash` runs `cmd.exe`. cmd.exe DOES NOT expand globs (`*`, `?`)
+the way POSIX shells do, and POSIX commands like `wc`, `cat`, `head`,
+`tail`, `sed`, `awk`, `which`, `ps`, `df`, `du` are usually NOT installed.
+Prefer:
+- `dir` / `type` / `findstr` / `where` (cmd built-ins)
+- `Get-ChildItem` / `Get-Content` / `Select-String` / `Measure-Object`
+  via `powershell -Command "..."`
+- ripgrep (`rg`) when installed — works the same on every platform.
+
+When a command fails with no output, the harness adds a `[hint: ...]`
+line explaining what likely went wrong. Don't redirect stderr to null
+(`2>nul`, `2>/dev/null`) — it suppresses the actual error.
 """.strip()
 
 
