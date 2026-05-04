@@ -17,7 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from core import auth, runtime, session as sessions, settings, ui
-from core.api import AnthropicProvider, OllamaProvider
+from core.api import AnthropicProvider, OllamaProvider, OpenAIProvider
 from core.loop import run
 
 
@@ -84,6 +84,7 @@ def main() -> int:
                 "provider",
                 [
                     (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
+                    (settings.PROVIDER_OPENAI, "OpenAI (or compatible)"),
                     (settings.PROVIDER_OLLAMA, "Ollama Cloud"),
                 ],
                 getattr(active_provider, "name", provider_name),
@@ -174,6 +175,7 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
         "provider",
         [
             ("anthropic", "Anthropic OAuth"),
+            ("openai", "OpenAI (or compatible)"),
             ("ollama", "Ollama Cloud"),
         ],
         saved.get("provider") or settings.PROVIDER_ANTHROPIC,
@@ -186,6 +188,15 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
             "provider": provider,
             "anthropic_model": model,
         }
+    elif provider == settings.PROVIDER_OPENAI:
+        model = args.model or _pick_model(provider, saved)
+        values = {
+            "workspace": str(workspace),
+            "provider": provider,
+            "openai_model": model,
+        }
+        if not os.getenv("OPENAI_API_KEY"):
+            ui.info("OPENAI_API_KEY is not set; set it before using OpenAI")
     else:
         model = args.model or _pick_model(provider, saved)
         host = settings.client_host(args.ollama_host or saved.get("ollama_host") or settings.OLLAMA_HOST)
@@ -252,11 +263,12 @@ def _pick(label: str, options: list[tuple[str, str]], default: str) -> str:
 
 
 def _pick_model(provider: str, saved: dict) -> str:
-    models = (
-        settings.ANTHROPIC_MODELS
-        if provider == settings.PROVIDER_ANTHROPIC
-        else settings.OLLAMA_MODELS
-    )
+    if provider == settings.PROVIDER_ANTHROPIC:
+        models = settings.ANTHROPIC_MODELS
+    elif provider == settings.PROVIDER_OPENAI:
+        models = settings.OPENAI_MODELS
+    else:
+        models = settings.OLLAMA_MODELS
     default = settings.model_default(provider, saved)
     options = [(m, m) for m in models]
     custom_value = "__custom__"
@@ -299,6 +311,13 @@ def _provider(
             kwargs["auth_token"] = cred.token
         return AnthropicProvider(**kwargs)
 
+    if provider_name == settings.PROVIDER_OPENAI:
+        return OpenAIProvider(
+            model=model_override or args.model or settings.model_default(provider_name, saved),
+            max_tokens=args.max_tokens or settings.env_int("OPENAI_MAX_TOKENS", settings.OPENAI_MAX_TOKENS),
+            base_url=settings.openai_base_url(saved),
+        )
+
     return OllamaProvider(
         model=model_override or args.model or settings.model_default(provider_name, saved),
         host=settings.ollama_host(args.ollama_host, saved),
@@ -316,6 +335,8 @@ def _save_runtime_choice(
     values: dict[str, object] = {"provider": provider_name, "workspace": str(cwd)}
     if provider_name == settings.PROVIDER_ANTHROPIC:
         values["anthropic_model"] = model
+    elif provider_name == settings.PROVIDER_OPENAI:
+        values["openai_model"] = model
     else:
         values["ollama_model"] = model
         values["ollama_host"] = settings.ollama_host(args.ollama_host, saved)

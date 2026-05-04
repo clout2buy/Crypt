@@ -18,7 +18,8 @@ CONFIG_PATH = APP_DIR / "config.json"
 
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_OLLAMA = "ollama"
-PROVIDERS = (PROVIDER_ANTHROPIC, PROVIDER_OLLAMA)
+PROVIDER_OPENAI = "openai"
+PROVIDERS = (PROVIDER_ANTHROPIC, PROVIDER_OLLAMA, PROVIDER_OPENAI)
 
 ANTHROPIC_MODEL = "claude-opus-4-7"
 # Anthropic counts the full requested max_tokens against per-minute rate
@@ -39,6 +40,18 @@ ANTHROPIC_MODELS = (
     "claude-haiku-4-5",
     "claude-opus-4-6",
     "claude-sonnet-4-6",
+)
+
+OPENAI_MODEL = "gpt-5"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+OPENAI_MAX_TOKENS = 8_000
+OPENAI_MODELS = (
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "o3",
+    "o3-mini",
 )
 
 OLLAMA_MODEL = "gpt-oss:120b-cloud"
@@ -133,7 +146,17 @@ def model_default(provider: str, saved: dict | None = None) -> str:
     saved = saved or load_config()
     if provider == PROVIDER_ANTHROPIC:
         return os.getenv("ANTHROPIC_MODEL") or saved.get("anthropic_model") or ANTHROPIC_MODEL
+    if provider == PROVIDER_OPENAI:
+        return os.getenv("OPENAI_MODEL") or saved.get("openai_model") or OPENAI_MODEL
     return os.getenv("OLLAMA_MODEL") or saved.get("ollama_model") or OLLAMA_MODEL
+
+
+def openai_base_url(saved: dict | None = None) -> str:
+    """Returns the configured OpenAI base URL (env > saved > default).
+    Lets users point at OpenAI-compatible endpoints (Together, Fireworks,
+    LM Studio, vLLM, etc.) without code changes."""
+    saved = saved or load_config()
+    return os.getenv("OPENAI_BASE_URL") or saved.get("openai_base_url") or OPENAI_BASE_URL
 
 
 def ollama_host(cli_host: str | None = None, saved: dict | None = None) -> str:

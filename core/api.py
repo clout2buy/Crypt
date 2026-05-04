@@ -28,6 +28,9 @@ from .settings import (
     ANTHROPIC_OAUTH_X_APP,
     ANTHROPIC_THINKING_BUDGET,
     OLLAMA_MODEL,
+    OPENAI_BASE_URL,
+    OPENAI_MAX_TOKENS,
+    OPENAI_MODEL,
 )
 
 
@@ -388,6 +391,235 @@ def _raise_for_status(resp: httpx.Response) -> None:
         500: InternalServerError,
     }.get(resp.status_code, APIStatusError)
     raise cls(message=msg, response=resp, body=body)
+
+
+class OpenAIProvider:
+    """OpenAI Chat Completions adapter with streaming + tool calls.
+
+    Works against the official endpoint and any OpenAI-compatible server
+    (Together, Fireworks, LM Studio, vLLM, etc.) via OPENAI_BASE_URL. The
+    internal message shape stays Anthropic-style; we convert in/out at
+    the wire boundary.
+
+    o-series models (o1/o3) get reasoning_effort=medium by default — no
+    setting because the API rejects unknown reasoning params on classic
+    models. We sniff the model name to pick the right parameter set.
+    """
+    name = "openai"
+    context_window = 128_000
+    is_oauth = False
+
+    def __init__(
+        self,
+        model: str = OPENAI_MODEL,
+        max_tokens: int = OPENAI_MAX_TOKENS,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        key = api_key or os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise RuntimeError(
+                "OpenAIProvider needs an API key (set OPENAI_API_KEY or pass api_key)."
+            )
+        self._api_key = key
+        self.model = model
+        self._max_tokens = max_tokens
+        self._base_url = (base_url or os.getenv("OPENAI_BASE_URL") or OPENAI_BASE_URL).rstrip("/")
+        self._http = httpx.Client(timeout=httpx.Timeout(10.0, read=180.0))
+        atexit.register(self.close)
+
+    def close(self) -> None:
+        try:
+            self._http.close()
+        except Exception:
+            pass
+
+    def stream_turn(self, messages, tools, system):
+        body = self._build_body(messages, tools, system)
+        url = f"{self._base_url}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        text_buf: list[str] = []
+        # Tool calls arrive as deltas keyed by index. Each call has a
+        # stable id (eventually), name, and JSON arguments built up over
+        # multiple chunks. We assemble per-index, then emit once at the end.
+        tool_calls: dict[int, dict] = {}
+        finish_reason = "stop"
+
+        with self._http.stream("POST", url, json=body, headers=headers) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                raise RuntimeError(
+                    f"openai HTTP {resp.status_code}: {resp.text[:500]}"
+                )
+            buf = ""
+            for chunk in resp.iter_text():
+                buf += chunk
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.rstrip("\r")
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = event.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    fr = choice.get("finish_reason")
+                    if fr:
+                        finish_reason = fr
+
+                    text = delta.get("content")
+                    if text:
+                        text_buf.append(text)
+                        yield TextDelta(text)
+
+                    for call_delta in delta.get("tool_calls") or []:
+                        idx = call_delta.get("index", 0)
+                        slot = tool_calls.setdefault(idx, {
+                            "id": "",
+                            "name": "",
+                            "arguments": "",
+                        })
+                        if call_delta.get("id"):
+                            slot["id"] = call_delta["id"]
+                        fn = call_delta.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["arguments"] += fn["arguments"]
+
+        content: list[dict] = []
+        if text_buf:
+            content.append({"type": "text", "text": "".join(text_buf)})
+        for idx in sorted(tool_calls):
+            slot = tool_calls[idx]
+            try:
+                args_obj = json.loads(slot["arguments"]) if slot["arguments"] else {}
+            except json.JSONDecodeError:
+                args_obj = {}
+            content.append({
+                "type": "tool_use",
+                "id": slot["id"] or f"call_{idx}",
+                "name": slot["name"] or "?",
+                "input": args_obj,
+            })
+
+        # Map OpenAI finish_reason onto our internal stop_reason vocabulary
+        # so the loop's max_tokens-escalate path keeps working uniformly.
+        if finish_reason == "tool_calls":
+            stop = "tool_use"
+        elif finish_reason == "length":
+            stop = "max_tokens"
+        else:
+            stop = "end_turn"
+
+        yield TurnEnd(
+            stop_reason=stop,
+            message={"role": "assistant", "content": content},
+        )
+
+    def _build_body(self, messages, tools, system):
+        msgs = [{"role": "system", "content": system}]
+        msgs.extend(_to_openai_messages(messages))
+        body: dict = {
+            "model": self.model,
+            "messages": msgs,
+            "stream": True,
+        }
+        # o-series uses max_completion_tokens; classic uses max_tokens.
+        # Sending the wrong one is a 400 on either side.
+        if self._is_reasoning_model():
+            body["max_completion_tokens"] = self._max_tokens
+        else:
+            body["max_tokens"] = self._max_tokens
+        if tools:
+            body["tools"] = [_to_openai_tool(t) for t in tools]
+            body["tool_choice"] = "auto"
+        return body
+
+    def _is_reasoning_model(self) -> bool:
+        m = self.model.lower()
+        return m.startswith("o1") or m.startswith("o3") or m.startswith("o4")
+
+
+def _to_openai_messages(messages: list[dict]) -> list[dict]:
+    """Convert internal Anthropic-style messages to OpenAI Chat Completions
+    format. Tool results become role=tool messages; assistant tool_use
+    blocks become role=assistant with a tool_calls array."""
+    out: list[dict] = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+            continue
+
+        if not isinstance(content, list):
+            continue
+
+        text_parts: list[str] = []
+        tool_calls: list[dict] = []
+        # Tool results live on user messages but become their own openai
+        # messages. We collect them and emit after the user's text (if any).
+        deferred_results: list[dict] = []
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                text_parts.append(str(block.get("text", "")))
+            elif btype == "tool_use":
+                args = block.get("input") or {}
+                tool_calls.append({
+                    "id": block.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(args),
+                    },
+                })
+            elif btype == "tool_result":
+                inner = block.get("content")
+                if isinstance(inner, list):
+                    inner = "".join(
+                        b.get("text", "") if isinstance(b, dict) else str(b)
+                        for b in inner
+                    )
+                deferred_results.append({
+                    "role": "tool",
+                    "tool_call_id": block.get("tool_use_id", ""),
+                    "content": str(inner) if inner is not None else "",
+                })
+            elif btype == "thinking":
+                # OpenAI's classic chat API has no thinking surface.
+                # o-series handles its own internal reasoning. Drop.
+                continue
+
+        if role == "assistant":
+            item: dict = {"role": "assistant", "content": "".join(text_parts) or None}
+            if tool_calls:
+                item["tool_calls"] = tool_calls
+            out.append(item)
+        elif role == "user":
+            if text_parts:
+                out.append({"role": "user", "content": "".join(text_parts)})
+            out.extend(deferred_results)
+
+    return out
 
 
 class OllamaProvider:
