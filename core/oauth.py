@@ -1,4 +1,4 @@
-"""OAuth PKCE login flow for Anthropic (Claude.ai accounts)."""
+"""OAuth PKCE login flow for Anthropic accounts."""
 from __future__ import annotations
 
 import base64
@@ -13,7 +13,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 from urllib.request import Request, urlopen
 
 from .settings import (
-    CLAUDE_CODE_VERSION,
+    ANTHROPIC_OAUTH_USER_AGENT,
     OAUTH_AUTHORIZE_URL,
     OAUTH_CALLBACK_PATH,
     OAUTH_CALLBACK_PORT,
@@ -77,7 +77,7 @@ def _exchange_code(code: str, verifier: str) -> dict:
     req = Request(OAUTH_TOKEN_URL, data=body, method="POST", headers={
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": f"claude-cli/{CLAUDE_CODE_VERSION} (external, cli)",
+        "User-Agent": ANTHROPIC_OAUTH_USER_AGENT,
     })
     with urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
@@ -92,7 +92,7 @@ def refresh(refresh_token: str) -> dict:
     req = Request(OAUTH_TOKEN_URL, data=body, method="POST", headers={
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": f"claude-cli/{CLAUDE_CODE_VERSION} (external, cli)",
+        "User-Agent": ANTHROPIC_OAUTH_USER_AGENT,
     })
     with urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())

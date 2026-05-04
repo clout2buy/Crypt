@@ -1,4 +1,4 @@
-"""crypt - minimal coding harness.
+"""crypt - local-first coding harness.
 
 Examples:
     python main.py
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from core import auth, settings, ui
+from core import auth, runtime, session as sessions, settings, ui
 from core.api import AnthropicProvider, OllamaProvider
 from core.loop import run
 
@@ -26,7 +26,7 @@ def main() -> int:
     load_dotenv()
     saved = settings.load_config()
 
-    p = argparse.ArgumentParser(prog="crypt", description="minimal coding harness")
+    p = argparse.ArgumentParser(prog="crypt", description="local-first coding harness")
     p.add_argument("--provider", choices=settings.PROVIDERS, help="anthropic oauth or ollama cloud")
     p.add_argument("--model", help="model id; overrides saved/default model")
     p.add_argument("--cwd", help="workspace root for tools")
@@ -41,7 +41,9 @@ def main() -> int:
     )
     p.add_argument("--no-thinking", action="store_true", help="disable extended thinking")
     p.add_argument("--no-picker", action="store_true", help="skip startup provider/model picker")
-    p.add_argument("command", nargs="?", choices=["login", "logout", "setup"], help="login | logout | setup")
+    p.add_argument("--resume", action="store_true", help="resume the latest Crypt session for this workspace")
+    p.add_argument("--session", help="resume a specific Crypt session id or title prefix")
+    p.add_argument("command", nargs="?", choices=["login", "logout", "setup", "doctor"], help="login | logout | setup | doctor")
     args = p.parse_args()
 
     if args.command == "login":
@@ -50,6 +52,11 @@ def main() -> int:
         return _do_logout()
     if args.command == "setup":
         _do_setup(saved, args)
+        return 0
+    if args.command == "doctor":
+        from core.doctor import run_doctor
+
+        print(run_doctor(settings.resolve_workspace(args.cwd, saved)))
         return 0
     did_setup = False
     if _needs_setup(saved, args):
@@ -64,15 +71,59 @@ def main() -> int:
         cred = _credential(provider_name)
         provider = _provider(args, saved, provider_name, cred, model_override)
         _save_runtime_choice(args, saved, provider_name, provider.model, cwd)
+        session_obj = _session_for_startup(args, cwd, provider)
         ui.clear_screen()
         _welcome(provider, cred, str(cwd))
 
+        def switch_model(active_provider):
+            nonlocal saved, provider_name, model_override, cred, provider
+
+            saved = settings.load_config()
+            ui.info("switch provider/model")
+            provider_name = _pick(
+                "provider",
+                [
+                    (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
+                    (settings.PROVIDER_OLLAMA, "Ollama Cloud"),
+                ],
+                getattr(active_provider, "name", provider_name),
+            )
+            model_override = _pick_model(provider_name, saved)
+
+            if provider_name == settings.PROVIDER_OLLAMA and not os.getenv("OLLAMA_API_KEY"):
+                ui.info("OLLAMA_API_KEY is not set; Ollama Cloud calls may fail until it is configured")
+
+            cred = _credential(provider_name)
+            if provider_name == settings.PROVIDER_ANTHROPIC and not cred:
+                if ui.ask("log in to Anthropic OAuth now?"):
+                    _do_login()
+                    cred = _credential(provider_name)
+
+            provider = _provider(args, saved, provider_name, cred, model_override)
+            _save_runtime_choice(args, saved, provider_name, provider.model, Path(runtime.cwd()))
+            ui.status_panel({
+                "provider": provider.name,
+                "model": provider.model,
+                "auth": cred.kind if cred else "none",
+                "approval": runtime.approval_label(),
+            })
+            return provider
+
         while True:
-            result = run(provider, show_thinking=args.show_thinking, cwd=str(cwd))
+            result = run(
+                provider,
+                show_thinking=args.show_thinking,
+                cwd=str(cwd),
+                model_switcher=switch_model,
+                session_obj=session_obj,
+            )
             if result == "login":
                 _do_login()
             elif result == "logout":
                 _do_logout()
+            elif result == "model":
+                provider = switch_model(provider)
+                continue
             else:
                 break
 
@@ -97,13 +148,32 @@ def _needs_setup(saved: dict, args: argparse.Namespace) -> bool:
     return not saved.get("provider") or not saved.get("workspace")
 
 
+def _session_for_startup(args: argparse.Namespace, cwd: Path, provider) -> sessions.Session:
+    query = args.session or ("latest" if args.resume else None)
+    if query:
+        info = sessions.find_session(cwd, query)
+        if info:
+            return sessions.load_session(
+                info.cwd or str(cwd),
+                info.session_id,
+                provider=getattr(provider, "name", ""),
+                model=getattr(provider, "model", ""),
+            )
+        ui.info(f"no matching session for {query!r}; starting a new one")
+    return sessions.Session(
+        cwd,
+        provider=getattr(provider, "name", ""),
+        model=getattr(provider, "model", ""),
+    )
+
+
 def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
     ui.info("setup: choose workspace, provider, and model")
     workspace = _ask_workspace(args.cwd, saved)
     provider = args.provider or _pick(
         "provider",
         [
-            ("anthropic", "Claude OAuth"),
+            ("anthropic", "Anthropic OAuth"),
             ("ollama", "Ollama Cloud"),
         ],
         saved.get("provider") or settings.PROVIDER_ANTHROPIC,
@@ -132,7 +202,7 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
     os.environ["CRYPT_ROOT"] = str(workspace)
     ui.info(f"saved setup in {settings.CONFIG_PATH}")
 
-    if provider == settings.PROVIDER_ANTHROPIC and not auth.resolve() and ui.ask("log in to Claude OAuth now?"):
+    if provider == settings.PROVIDER_ANTHROPIC and not auth.resolve() and ui.ask("log in to Anthropic OAuth now?"):
         _do_login()
     return new_saved
 
@@ -147,7 +217,7 @@ def _startup_choice(saved: dict, args: argparse.Namespace, skip: bool = False) -
     provider_name = _pick(
         "provider",
         [
-            (settings.PROVIDER_ANTHROPIC, "Anthropic Claude OAuth"),
+            (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
             (settings.PROVIDER_OLLAMA, "Ollama Cloud"),
         ],
         provider_name,

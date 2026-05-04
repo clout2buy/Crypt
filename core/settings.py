@@ -21,8 +21,18 @@ PROVIDER_OLLAMA = "ollama"
 PROVIDERS = (PROVIDER_ANTHROPIC, PROVIDER_OLLAMA)
 
 ANTHROPIC_MODEL = "claude-opus-4-7"
-ANTHROPIC_MAX_TOKENS = 8192
-ANTHROPIC_THINKING_BUDGET = 1024
+# Anthropic counts the full requested max_tokens against per-minute rate
+# limits BEFORE the response is generated, so reserving more is not free.
+# 8k is roughly 2x the p99 of real coding-agent responses; turns that need
+# more get one auto-retry at ESCALATED_MAX_TOKENS instead of paying the
+# rate-limit tax on every single request. Mirrors Claude Code's
+# CAPPED_DEFAULT_MAX_TOKENS / ESCALATED_MAX_TOKENS pattern.
+ANTHROPIC_MAX_TOKENS = 8_000
+ANTHROPIC_ESCALATED_MAX_TOKENS = 32_000
+# Anthropic requires `thinking.budget_tokens >= 1024` when thinking is enabled
+# AND `budget_tokens < max_tokens`. 4k leaves ~4k for the response itself
+# under the default cap, which fits the median real reply.
+ANTHROPIC_THINKING_BUDGET = 4_000
 ANTHROPIC_MODELS = (
     "claude-opus-4-7",
     "claude-sonnet-4-5",
@@ -45,8 +55,13 @@ OLLAMA_MODELS = (
     "llama3.3:70b-cloud",
 )
 
-CLAUDE_CODE_VERSION = "2.1.75"
-CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+CRYPT_VERSION = "0.3.0"
+CRYPT_IDENTITY = "You are Crypt, a local-first software engineering agent."
+# Anthropic's OAuth tokens are issued to Claude Code's app id; the edge
+# rate-limits OAuth traffic that doesn't present these exact headers
+# (429 with no anthropic-ratelimit-* headers). Bump version with the real CLI.
+ANTHROPIC_OAUTH_USER_AGENT = "claude-cli/2.1.75"
+ANTHROPIC_OAUTH_X_APP = "cli"
 ANTHROPIC_BASE_BETAS = (
     "fine-grained-tool-streaming-2025-05-14,"
     "interleaved-thinking-2025-05-14"

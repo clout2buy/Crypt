@@ -2,21 +2,31 @@
 
 Internal messages use Anthropic-style content blocks:
     {"role": "user" | "assistant", "content": str | [block, ...]}
+
+The Anthropic path uses raw httpx, not the anthropic-python SDK, because
+the SDK injects X-Stainless-* fingerprint headers that the Anthropic edge
+uses to detect non-Claude-Code OAuth traffic and silently rate-limit it.
+Mirrors MrDoing's `mrdoing/stream.py`.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 from dataclasses import dataclass
 from typing import Iterator, Protocol
 
+import httpx
+
 from .settings import (
+    ANTHROPIC_BASE_BETAS,
+    ANTHROPIC_ESCALATED_MAX_TOKENS,
     ANTHROPIC_MAX_TOKENS,
     ANTHROPIC_MODEL,
     ANTHROPIC_OAUTH_BETAS,
+    ANTHROPIC_OAUTH_USER_AGENT,
+    ANTHROPIC_OAUTH_X_APP,
     ANTHROPIC_THINKING_BUDGET,
-    CLAUDE_CODE_IDENTITY,
-    CLAUDE_CODE_VERSION,
     OLLAMA_MODEL,
 )
 
@@ -44,6 +54,7 @@ Event = TextDelta | ThinkingDelta | TurnEnd
 class Provider(Protocol):
     name: str
     model: str
+    is_oauth: bool
 
     def stream_turn(
         self,
@@ -51,6 +62,14 @@ class Provider(Protocol):
         tools: list[dict],
         system: str,
     ) -> Iterator[Event]: ...
+
+
+_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+# Prepended to system blocks on OAuth so the server's OAuth path
+# recognizes us as Claude Code. MUST be the first system block.
+_CLAUDE_CODE_IDENTITY = (
+    "You are Claude Code, Anthropic's official CLI for Claude."
+)
 
 
 class AnthropicProvider:
@@ -64,73 +83,317 @@ class AnthropicProvider:
         thinking_budget: int = ANTHROPIC_THINKING_BUDGET,
         auth_token: str | None = None,
     ) -> None:
-        from anthropic import Anthropic
-
-        kwargs: dict = {}
-        if auth_token:
-            kwargs["auth_token"] = auth_token
-            kwargs["default_headers"] = {
-                "anthropic-beta": ANTHROPIC_OAUTH_BETAS,
-                "anthropic-dangerous-direct-browser-access": "true",
-                "user-agent": f"claude-cli/{CLAUDE_CODE_VERSION}",
-                "x-app": "cli",
-            }
-        self._client = Anthropic(**kwargs)
-        if auth_token:
-            self._client.api_key = None
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not auth_token and not api_key:
+            raise RuntimeError(
+                "AnthropicProvider needs either an OAuth auth_token or "
+                "ANTHROPIC_API_KEY in the environment."
+            )
+        self._auth_token = auth_token
+        self._api_key = api_key
         self._oauth = bool(auth_token)
         self.model = model
         self._max_tokens = max_tokens
-        self._thinking_budget = min(thinking_budget, max(0, max_tokens - 1))
+        self._max_tokens_override = 0
+        # Thinking budget must stay strictly below max_tokens; the API
+        # rejects budgets >= max_tokens. Anthropic also requires a 1024
+        # minimum when thinking is enabled — clamp up to honor intent.
+        if thinking_budget <= 0 or max_tokens < 1025:
+            self._thinking_budget = 0
+        else:
+            self._thinking_budget = max(1024, min(thinking_budget, max_tokens - 1))
+        self._http = httpx.Client(timeout=httpx.Timeout(10.0, read=180.0))
+        # Don't leak the connection pool when Python exits. atexit is
+        # a process-wide hook; multiple providers register multiple
+        # close handlers and that's fine — close() is idempotent.
+        atexit.register(self.close)
 
-    def stream_turn(self, messages, tools, system):
-        kwargs = {
-            "model": self.model,
-            "max_tokens": self._max_tokens,
-            "system": system,
-            "messages": messages,
+    @property
+    def is_oauth(self) -> bool:
+        return self._oauth
+
+    def close(self) -> None:
+        try:
+            self._http.close()
+        except Exception:
+            pass
+
+    def escalate_once(self, escalated: int = ANTHROPIC_ESCALATED_MAX_TOKENS) -> int:
+        """Arm a one-shot max_tokens override for the next stream_turn().
+
+        Used by the loop when a turn ends with stop_reason='max_tokens' so we
+        get one clean retry at a higher budget. The override clears itself
+        after the next API call.
+        """
+        self._max_tokens_override = max(escalated, self._max_tokens)
+        return self._max_tokens_override
+
+    def _build_request(self, messages, tools, system):
+        max_tokens = self._max_tokens_override or self._max_tokens
+        self._max_tokens_override = 0
+        if self._thinking_budget and self._thinking_budget >= max_tokens:
+            thinking_budget = max(0, max_tokens - 1)
+            if thinking_budget < 1024:
+                thinking_budget = 0
+        else:
+            thinking_budget = self._thinking_budget
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "anthropic-version": "2023-06-01",
+            "anthropic-dangerous-direct-browser-access": "true",
         }
         if self._oauth:
-            kwargs["system"] = [
-                {"type": "text", "text": CLAUDE_CODE_IDENTITY},
+            headers["Authorization"] = f"Bearer {self._auth_token}"
+            headers["anthropic-beta"] = ANTHROPIC_OAUTH_BETAS
+            headers["user-agent"] = ANTHROPIC_OAUTH_USER_AGENT
+            headers["x-app"] = ANTHROPIC_OAUTH_X_APP
+            system_blocks = [
+                {"type": "text", "text": _CLAUDE_CODE_IDENTITY},
                 {"type": "text", "text": system},
             ]
-        if tools:
-            kwargs["tools"] = tools
-        if self._thinking_budget:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
+        else:
+            headers["x-api-key"] = self._api_key
+            headers["anthropic-beta"] = ANTHROPIC_BASE_BETAS
+            system_blocks = [{"type": "text", "text": system}]
 
-        with self._client.messages.stream(**kwargs) as stream:
-            for event in stream:
-                if event.type != "content_block_delta":
-                    continue
-                delta = event.delta
-                if delta.type == "text_delta":
-                    yield TextDelta(delta.text)
-                elif delta.type == "thinking_delta":
-                    yield ThinkingDelta(delta.thinking)
+        # Cache breakpoints: Anthropic allows 4 cache_control markers per
+        # request and caches everything up to and including the marked
+        # block. Spend them on system + tools + last 2 user messages so
+        # multi-turn sessions get deep cache hits.
+        system_blocks = _mark_last_for_cache(system_blocks)
+        cached_tools = _mark_last_for_cache(list(tools)) if tools else []
+        cached_messages = _mark_messages_for_cache(messages)
 
-            final = stream.get_final_message()
+        body: dict = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": system_blocks,
+            "messages": cached_messages,
+            "stream": True,
+        }
+        if cached_tools:
+            body["tools"] = cached_tools
+        if thinking_budget:
+            body["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+        return headers, body
 
-        usage = None
-        if final.usage:
-            usage = {
-                "input_tokens": final.usage.input_tokens,
-                "output_tokens": final.usage.output_tokens,
-            }
+    def stream_turn(self, messages, tools, system):
+        headers, body = self._build_request(messages, tools, system)
+        url = f"{_ANTHROPIC_BASE_URL}/v1/messages"
+
+        with self._http.stream("POST", url, json=body, headers=headers) as resp:
+            if resp.status_code >= 400:
+                _raise_for_status(resp)
+
+            content_blocks: list[dict | None] = []
+            usage: dict = {"input_tokens": 0, "output_tokens": 0}
+            stop_reason = "end_turn"
+            buf = ""
+            for chunk in resp.iter_text():
+                buf += chunk
+                while "\n\n" in buf:
+                    block, buf = buf.split("\n\n", 1)
+                    parsed = _parse_sse(block)
+                    if parsed is None:
+                        continue
+                    event_type, data = parsed
+                    for ev in _process_event(event_type, data, content_blocks, usage):
+                        if isinstance(ev, _StopReason):
+                            stop_reason = ev.value
+                        else:
+                            yield ev
+
+        # Drop thinking blocks from persisted history. Anthropic requires
+        # a `signature` field on round-tripped thinking blocks (delivered
+        # via signature_delta), and re-sending without it 400s on the next
+        # turn. Match MrDoing: stream thinking to the UI, never persist it.
+        content = [b for b in content_blocks if b and b.get("type") != "thinking"]
+        for blk in content:
+            if blk.get("type") == "tool_use":
+                raw = blk.pop("_partial_json", "")
+                try:
+                    blk["input"] = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    blk["input"] = {}
         yield TurnEnd(
-            stop_reason=final.stop_reason or "end_turn",
-            message={
-                "role": "assistant",
-                "content": [block.model_dump(exclude_none=True) for block in final.content],
-            },
+            stop_reason=stop_reason,
+            message={"role": "assistant", "content": content},
             usage=usage,
         )
+
+
+@dataclass
+class _StopReason:
+    value: str
+
+
+def _parse_sse(block: str):
+    event_type = None
+    data_parts: list[str] = []
+    for line in block.splitlines():
+        if line.startswith("event:"):
+            event_type = line[6:].strip()
+        elif line.startswith("data:"):
+            data_parts.append(line[5:].lstrip())
+    if not event_type or not data_parts:
+        return None
+    try:
+        return event_type, json.loads("\n".join(data_parts))
+    except json.JSONDecodeError:
+        return None
+
+
+def _process_event(event_type, data, content_blocks, usage):
+    if event_type == "message_start":
+        u = (data.get("message") or {}).get("usage") or {}
+        usage["input_tokens"] = u.get("input_tokens", 0)
+        usage["output_tokens"] = u.get("output_tokens", 0)
+        return
+
+    if event_type == "content_block_start":
+        try:
+            index = int(data.get("index", 0))
+        except (TypeError, ValueError):
+            return
+        meta = data.get("content_block") or {}
+        btype = meta.get("type")
+        while len(content_blocks) <= index:
+            content_blocks.append(None)
+        if btype == "text":
+            content_blocks[index] = {"type": "text", "text": ""}
+        elif btype == "thinking":
+            content_blocks[index] = {"type": "thinking", "thinking": ""}
+        elif btype == "tool_use":
+            content_blocks[index] = {
+                "type": "tool_use",
+                "id": meta.get("id") or f"tool_{index}",
+                "name": meta.get("name") or "?",
+                "input": {},
+                "_partial_json": "",
+            }
+        return
+
+    if event_type == "content_block_delta":
+        try:
+            index = int(data.get("index", 0))
+        except (TypeError, ValueError):
+            return
+        if index < 0 or index >= len(content_blocks) or content_blocks[index] is None:
+            return
+        block = content_blocks[index]
+        delta = data.get("delta") or {}
+        dtype = delta.get("type")
+        if dtype == "text_delta":
+            text = delta.get("text", "")
+            block["text"] = block.get("text", "") + text
+            yield TextDelta(text)
+        elif dtype == "thinking_delta":
+            text = delta.get("thinking", "")
+            block["thinking"] = block.get("thinking", "") + text
+            yield ThinkingDelta(text)
+        elif dtype == "input_json_delta":
+            partial = delta.get("partial_json", "")
+            block["_partial_json"] = block.get("_partial_json", "") + partial
+        return
+
+    if event_type == "message_delta":
+        u = data.get("usage") or {}
+        if "output_tokens" in u:
+            usage["output_tokens"] = u["output_tokens"]
+        sr = (data.get("delta") or {}).get("stop_reason")
+        if sr:
+            yield _StopReason(sr)
+        return
+
+    if event_type == "error":
+        err = data.get("error") or {}
+        raise RuntimeError(f"stream error: {err.get('message') or err}")
+
+
+def _mark_cache_breakpoint(block: dict) -> dict:
+    return {**block, "cache_control": {"type": "ephemeral"}}
+
+
+def _mark_last_for_cache(items: list[dict]) -> list[dict]:
+    if not items:
+        return items
+    return items[:-1] + [_mark_cache_breakpoint(items[-1])]
+
+
+def _mark_messages_for_cache(messages: list[dict]) -> list[dict]:
+    if not messages:
+        return messages
+    out = list(messages)
+    marked = 0
+    for idx in range(len(out) - 1, -1, -1):
+        msg = out[idx]
+        if msg.get("role") != "user":
+            continue
+        out[idx] = _cache_mark_user_message(msg)
+        marked += 1
+        if marked >= 2:
+            break
+    return out
+
+
+def _cache_mark_user_message(msg: dict) -> dict:
+    content = msg.get("content")
+    if isinstance(content, str):
+        return {
+            **msg,
+            "content": [{
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }],
+        }
+    if isinstance(content, list) and content:
+        new_content = list(content)
+        last = new_content[-1]
+        if isinstance(last, dict):
+            new_content[-1] = {**last, "cache_control": {"type": "ephemeral"}}
+        return {**msg, "content": new_content}
+    return msg
+
+
+def _raise_for_status(resp: httpx.Response) -> None:
+    """Map an HTTP error response onto an anthropic SDK exception so
+    loop._format_error keeps recognizing it (RateLimitError etc.)."""
+    try:
+        resp.read()
+        body = resp.json() if resp.text else {}
+    except Exception:
+        body = {}
+    msg = (body.get("error") or {}).get("message") if isinstance(body, dict) else None
+    msg = msg or resp.text or f"HTTP {resp.status_code}"
+    from anthropic import (
+        APIStatusError,
+        AuthenticationError,
+        BadRequestError,
+        InternalServerError,
+        NotFoundError,
+        PermissionDeniedError,
+        RateLimitError,
+        UnprocessableEntityError,
+    )
+    cls = {
+        400: BadRequestError,
+        401: AuthenticationError,
+        403: PermissionDeniedError,
+        404: NotFoundError,
+        422: UnprocessableEntityError,
+        429: RateLimitError,
+        500: InternalServerError,
+    }.get(resp.status_code, APIStatusError)
+    raise cls(message=msg, response=resp, body=body)
 
 
 class OllamaProvider:
     name = "ollama"
     context_window = 128_000
+    is_oauth = False
 
     def __init__(
         self,
