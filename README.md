@@ -1,119 +1,197 @@
-# crypt
+# Crypt
 
-minimal Claude-Code–style coding agent. ~2k lines of Python, no framework, no
-magic. think of it as the kind of thing you can read in an afternoon and then
-fork into your own.
+Crypt is a local-first coding agent harness for serious software work. It is
+small enough to understand, but built around the workflow primitives that make
+an agent useful day to day: durable sessions, resume, project instructions,
+memory, safe file edits, background shell jobs, web research, media reads,
+todos, plans, git inspection, and subagents.
 
-```
-─[ STA · opus 4.7 · ▰▰▱▱▱▱▱▱▱▱  9% · 16k / 70k · ~/code ]──
-```
-
-## what it is
-
-a terminal coding agent that runs the same Think → Act → Observe loop the big
-ones do, with a real toolbox: file ops, bash, glob, grep, git, todos, plans,
-subagents. plug in Claude via OAuth (no API key needed if you have a Max plan)
-or any Ollama Cloud model.
-
-built so people can learn from it, hack on it, or use it as a starting point
-for their own harness. nothing's hidden — every tool is one file in `tools/`,
-the loop is ~250 lines, the UI is one module.
-
-## quick start
+## Quick Start
 
 ```bash
-git clone https://github.com/clout2buy/Crypt.git
-cd Crypt
 pip install -r requirements.txt
+python main.py setup
+python main.py doctor
 python main.py
 ```
 
-first run drops you into setup — pick a workspace, provider, and model. done.
+Anthropic OAuth:
 
 ```bash
-# Claude — OAuth login (uses your Max plan, no API key)
 python main.py login
-python main.py
+python main.py --provider anthropic --model claude-opus-4-7
+```
 
-# Ollama Cloud
-export OLLAMA_API_KEY=...
+Ollama Cloud:
+
+```bash
+set OLLAMA_API_KEY=...
 python main.py --provider ollama --model gpt-oss:120b-cloud
 ```
 
-## the toolbox (14 tools)
+Resume the latest session for the workspace:
 
-| read-only       | edit / run         | meta            |
-| --------------- | ------------------ | --------------- |
-| `list_files`    | `edit_file` *      | `todos`         |
-| `read_file` †   | `write_file`       | `present_plan`  |
-| `glob`          | `bash`             | `ask_user`      |
-| `grep`          | `open_file`        | `spawn_agent`   |
-| `git` (ro)      |                    | `set_workspace` |
-
-\* atomic batch edits + line-numbered failure hints + diff snippet on success
-† line-range slicing via `offset` + `limit`, refuses binaries
-
-each tool is one Python file. drop a `TOOL = Tool(...)` in `tools/foo.py` and
-it auto-registers — no import edits anywhere.
-
-## slash commands
-
-```
-/help              cheatsheet
-/status            provider · auth · tools · todos · ctx
-/yolo              auto-approve every tool (prompt turns red)
-/thinking          toggle thinking-stream display
-/cwd [path]        show or move workspace mid-session
-/clear             wipe context + todos
-/login   /logout   swap or sign out of Claude OAuth
+```bash
+python main.py --resume
 ```
 
-## architecture
+## Recommended Setup
 
+For the best experience, install [ripgrep](https://github.com/BurntSushi/ripgrep)
+(`rg`) on your PATH. Crypt's `grep` tool detects it and uses it for an order-of-
+magnitude speedup on real repos. A pure-Python fallback runs when `rg` is absent
+so the tool still works on a fresh box. `python main.py doctor` reports which
+backend is in use.
+
+## Core Workflow
+
+- Every session is written to `~/.crypt/projects/<project>/<session>.jsonl`.
+- `/sessions` lists resumable conversations for the workspace.
+- `/resume [id|text]` swaps the live thread to a previous session.
+- `/compact` summarizes older context into a durable continuation snapshot.
+- Long sessions are also micro-compacted automatically: stale tool results
+  (old reads, greps, bash output) get elided once the context is half full.
+- `/memory` reads durable memory from `~/.crypt/memory/MEMORY.md`.
+- `/memory add <fact>` saves durable workflow/project facts.
+- `/background` lists background shell jobs.
+- `/doctor` runs local harness self-checks for sessions, tools, prompt identity,
+  file safety, background jobs, ripgrep, and writable app dir.
+
+## Tools
+
+Crypt loads tools dynamically from `tools/*.py`.
+
+- `read_file`, `read_media`, `list_files`, `glob`, `grep`
+- `edit_file`, `write_file`
+- `bash`, `bash_start`, `bash_poll`, `bash_kill`
+- `git`, `git_branch`, `git_stage`, `git_commit`
+- `web_search`, `web_fetch`
+- `todos`, `present_plan`, `ask_user`, `memory`
+- `spawn_agent`, `set_workspace`, `open_file`
+
+### Bash Output
+
+`bash` caps the model-visible output at ~30 KB head + 30 KB tail. Anything
+larger spills to `~/.crypt/runs/<timestamp>-<id>.log` and the path is
+returned in the result so the model can grep or tail it without re-running
+the command. This stops a single noisy build from draining the context
+window in one tool call.
+
+### Subagents
+
+`spawn_agent` runs a fresh-context, read-only subagent and returns only its
+final report. The optional `context` field lets the parent pass excerpts
+(file snippets, prior findings) so the subagent does not re-read what the
+parent already has.
+
+## Permissions
+
+Crypt has three approval modes:
+
+- `manual` (default) — every shell or edit asks once
+- `/yolo` — file edits skip prompts, shell still asks
+- `/yolo all` — all tool prompts bypassed
+- `/safe` — return to manual
+
+Destructive operations (`rm -rf`, `git reset --hard`, `git push --force`,
+`git clean`, `dd`, ...) always confirm even in yolo. Use the dedicated tools
+when they exist (`edit_file` instead of `sed -i`, etc.) so this detection
+stays accurate.
+
+### Allow / Deny Rules
+
+Drop a `~/.crypt/permissions.json` file to pre-approve specific tool calls
+or hard-block others. Format:
+
+```json
+{
+  "allow": [
+    "bash:git status*",
+    "bash:git diff*",
+    "bash:rg *",
+    "bash:ls *"
+  ],
+  "deny": [
+    "bash:rm -rf /*",
+    "bash:git push --force*"
+  ]
+}
 ```
-main.py            CLI + setup wizard
+
+Each rule is `<tool_name>:<glob>`. The glob matches the tool's user-facing
+summary string (the same text shown in the approval prompt). Globs use `*`
+and `?`, no regex. Precedence: deny wins over allow, allow skips every
+prompt below it including the danger prompt (you opted in by name).
+
+## Project Instructions
+
+Crypt automatically loads project guidance from the current workspace and
+parents:
+
+- `CRYPT.md`
+- `AGENTS.md`
+- `CLAUDE.md`
+- `.crypt/instructions.md`
+
+Use `CRYPT.md` for native Crypt instructions. `CLAUDE.md` is supported so
+existing projects can migrate without losing their local rules.
+
+## Design Rules
+
+- Crypt identifies as Crypt.
+- The prompt is assembled from modular Crypt-native sections in
+  `core/prompt.py`.
+- The git snapshot in the system prompt is computed once per session per
+  workspace so turns stay cache-friendly and fast.
+- Existing files must be read before editing; stale files are rejected.
+- Long commands should run as background jobs instead of blocking the loop.
+- Independent read-only tool calls and subagents can run in parallel.
+- Tool results from the web are treated as untrusted external data.
+- Common secrets from the environment are redacted from tool output before they
+  enter the transcript.
+- Durable memory is opt-in through the memory tool or `/memory add`.
+
+## Architecture
+
+```text
+main.py              CLI, setup, provider/model/session startup
 core/
-  loop.py          the TAOR loop
-  api.py           Anthropic + Ollama adapters (Anthropic-style internal format)
-  oauth.py         PKCE browser-redirect flow for Claude.ai
-  auth.py          token storage + auto-refresh
-  runtime.py       session state shared with tools (yolo, cwd, subagent runner)
-  ui.py            terminal UI — truecolor ANSI, no deps
-  settings.py      paths, defaults, config persistence
+  loop.py            interactive think-act-observe loop
+  prompt.py          modular Crypt-native system prompt builder
+  session.py         append-only JSONL transcripts and resume lookup
+  compact.py         conversation + per-tool-result micro-compaction
+  memory.py          durable memory and project instruction loading
+  permissions.py     ~/.crypt/permissions.json allow/deny rules
+  redact.py          best-effort secret redaction for tool outputs
+  doctor.py          local harness self-checks
+  file_state.py      read-before-edit and stale-file protection
+  background.py      background shell task manager
+  api.py             Anthropic and Ollama provider adapters
+  runtime.py         session-scoped runtime hooks shared with tools
+  ui.py              terminal UI (animated splash + Rich live region)
 tools/
-  *.py             one tool per file, dynamic discovery via importlib
-  fs.py            shared workspace-safe helpers (path resolve, binary detect)
+  *.py               one tool per file, auto-registered
 ```
 
-three rules that keep it modular:
+## Files Crypt Writes
 
-1. tools never import from `core.loop` — they go through `core.runtime`
-2. `ui.py` has no app state, just renders what it's told
-3. each tool owns its own teaching prompt — concatenated into the system prompt
-   at startup, so the model learns when to use what
+```text
+~/.crypt/
+  auth.json            OAuth tokens (mode 0600)
+  config.json          provider, model, workspace defaults
+  permissions.json     optional allow/deny rules (you create this)
+  memory/MEMORY.md     durable user memory index + entries
+  projects/<slug>/     per-workspace session JSONLs
+  runs/                bash output spill files for oversized commands
+  tasks/<sid>/         background shell job logs
+```
 
-## design notes
+Set `CRYPT_NO_ANIMATION=1` to disable the startup animation if you prefer a
+static splash (e.g. for slow terminals or screencast recording).
 
-- **no patch tool.** tried it, models produce broken unified diffs. `edit_file`
-  does atomic batch substring replacements with helpful failure messages instead
-  (line numbers of partial matches, hint when `\r` is in the search string).
-- **no autorun test/check tool.** the model already has `bash` and knows what
-  `pytest` is. adding a "smart check" tool just hands it more ways to be
-  confidently wrong.
-- **plan mode is model-driven.** there's no `/plan` slash command — the model
-  calls `present_plan` itself when the task warrants it (3+ steps, multi-file,
-  refactors). user approves, model executes.
-- **OAuth uses the public Claude Code client_id.** same one Anthropic's
-  official CLI uses. tokens land in `~/.crypt/auth.json` (mode 600 on Unix),
-  never in the repo.
+## Status
 
-## not yet
-
-- `git commit` / staging — only read-only git for now (status / diff / log / show)
-- session persistence across runs
-- project indexing / vector search
-- hot-reload tools without restart
-
-## license
-
-MIT. fork it, ship it, change everything.
+Crypt is built for migration from heavier coding harnesses, but parity should
+be judged by real workflow tests: resume a task after restart, compact a long
+session, edit safely after reads, run background checks, fetch docs, inspect
+media, and verify changes before reporting completion.
