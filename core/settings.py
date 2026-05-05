@@ -63,6 +63,7 @@ OLLAMA_MODELS = (
     "qwen3-coder:30b-cloud",
     "kimi-k2:latest",
     "kimi-k2:cloud",
+    "kimi-k2.6:cloud",
     "deepseek-v3.1:cloud",
     "glm-4.6:cloud",
     "llama3.3:70b-cloud",

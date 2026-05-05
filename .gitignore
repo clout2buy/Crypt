@@ -31,6 +31,11 @@ Thumbs.db
 scratch/
 _stage/
 
+# Generated test artifacts (live demos created during sessions, not source)
+holographic*.html
+advanced-*.html
+new-holographic*.html
+
 # User auth (already lives in ~/.crypt/, never in repo, but belt + suspenders)
 .crypt/
 auth.json

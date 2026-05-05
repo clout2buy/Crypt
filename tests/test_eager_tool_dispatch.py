@@ -1,0 +1,394 @@
+from __future__ import annotations
+
+from core import loop, runtime
+from core.api import TextDelta, ToolUseProgress, ToolUseReady, TurnEnd, _process_event
+from tools import registry
+from tools.types import Tool
+
+
+class _FakeProvider:
+    name = "fake"
+    model = "fake-model"
+    is_oauth = False
+
+    def stream_turn(self, messages, tools, system):
+        yield TextDelta("I'll do that.")
+        yield ToolUseReady(
+            message={
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I'll do that."},
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "read_file",
+                        "input": {"path": "README.md"},
+                    },
+                ],
+            }
+        )
+        raise AssertionError("stream should be cut once a tool call is ready")
+
+
+def test_stream_one_turn_cuts_over_to_ready_tool(workspace):
+    provider = _FakeProvider()
+    runtime.configure(provider, str(workspace), session=None)
+
+    end = loop._stream_one_turn(
+        provider,
+        messages=[],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=False,
+    )
+
+    assert end.stop_reason == "tool_use"
+    assert end.message["content"][1]["name"] == "read_file"
+    assert end.message["content"][1]["input"] == {"path": "README.md"}
+
+
+def test_anthropic_block_stop_emits_ready_tool():
+    content_blocks = []
+    usage = {"input_tokens": 10, "output_tokens": 3}
+
+    list(_process_event(
+        "content_block_start",
+        {
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "read_file",
+            },
+        },
+        content_blocks,
+        usage,
+    ))
+    list(_process_event(
+        "content_block_delta",
+        {
+            "index": 0,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": '{"path":"README.md"}',
+            },
+        },
+        content_blocks,
+        usage,
+    ))
+
+    events = list(_process_event(
+        "content_block_stop",
+        {"index": 0},
+        content_blocks,
+        usage,
+    ))
+
+    assert len(events) == 1
+    ready = events[0]
+    assert isinstance(ready, ToolUseReady)
+    assert ready.usage == usage
+    assert ready.message["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "read_file",
+            "input": {"path": "README.md"},
+        }
+    ]
+
+
+def test_anthropic_json_delta_emits_tool_progress():
+    content_blocks = []
+    usage = {"input_tokens": 0, "output_tokens": 0}
+
+    start_events = list(_process_event(
+        "content_block_start",
+        {
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "write_file",
+            },
+        },
+        content_blocks,
+        usage,
+    ))
+    delta_events = list(_process_event(
+        "content_block_delta",
+        {
+            "index": 0,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": '{"path":"demo.html"',
+            },
+        },
+        content_blocks,
+        usage,
+    ))
+
+    progress = [event for event in start_events + delta_events if isinstance(event, ToolUseProgress)]
+    assert len(progress) == 2
+    assert progress[-1].name == "write_file"
+    assert progress[-1].call_id == "toolu_1"
+    assert progress[-1].argument_chars == len('{"path":"demo.html"')
+
+
+class _TextThenToolProvider:
+    name = "fake"
+    model = "fake-model"
+    is_oauth = False
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seen_messages: list[list[dict]] = []
+
+    def stream_turn(self, messages, tools, system):
+        self.calls += 1
+        self.seen_messages.append(list(messages))
+        if self.calls == 1:
+            yield TextDelta("```html\n")
+            raise AssertionError("artifact text stream should be cut immediately")
+        if self.calls == 2:
+            yield ToolUseReady(
+                message={
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "stub",
+                            "input": {"x": "ok"},
+                        }
+                    ],
+                }
+            )
+            return
+        yield TextDelta("done")
+        yield TurnEnd(
+            stop_reason="end_turn",
+            message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        )
+
+
+class _TextThenToolNoRenderProvider(_TextThenToolProvider):
+    def stream_turn(self, messages, tools, system):
+        self.calls += 1
+        self.seen_messages.append(list(messages))
+        if self.calls == 1:
+            text = "```html\n" + ("<section>artifact</section>\n" * 20) + "```"
+            yield TextDelta(text)
+            yield TurnEnd(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"type": "text", "text": text}]},
+            )
+            return
+        if self.calls == 2:
+            yield ToolUseReady(
+                message={
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "stub",
+                            "input": {"x": "ok"},
+                        }
+                    ],
+                }
+            )
+            return
+        yield TextDelta("done")
+        yield TurnEnd(
+            stop_reason="end_turn",
+            message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        )
+
+
+def test_text_only_artifact_answer_is_retried_with_tools(monkeypatch, workspace):
+    provider = _TextThenToolNoRenderProvider()
+    runtime.configure(provider, str(workspace), session=None)
+    tool = Tool(
+        name="stub",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=lambda args: f"ran {args['x']}",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    messages = [{"role": "user", "content": "make me a super advanced html"}]
+    loop._run_until_done(provider, messages, 0, 0, render=False)
+
+    assert provider.calls == 3
+    assert any(
+        "pasted the artifact in chat" in block.get("text", "")
+        for msg in messages
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        if isinstance(block, dict)
+    )
+    assert any(
+        block.get("type") == "tool_result" and "ran ok" in block.get("content", "")
+        for msg in messages
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        if isinstance(block, dict)
+    )
+
+
+def test_rendered_artifact_stream_is_cut_before_full_generation(monkeypatch, workspace):
+    provider = _TextThenToolProvider()
+    runtime.configure(provider, str(workspace), session=None)
+    tool = Tool(
+        name="stub",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=lambda args: f"ran {args['x']}",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    messages = [{"role": "user", "content": "make me a super advanced html"}]
+    loop._run_until_done(provider, messages, 0, 0, render=True)
+
+    assert provider.calls == 3
+    assert any(
+        "pasted the artifact in chat" in block.get("text", "")
+        for msg in messages
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        if isinstance(block, dict)
+    )
+    assert any(
+        block.get("type") == "tool_result" and "ran ok" in block.get("content", "")
+        for msg in messages
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        if isinstance(block, dict)
+    )
+
+
+class _PlanThenToolProvider:
+    name = "fake"
+    model = "fake-model"
+    is_oauth = False
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def stream_turn(self, messages, tools, system):
+        self.calls += 1
+        if self.calls == 1:
+            yield ToolUseReady(
+                message={
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "plan_1",
+                        "name": "present_plan",
+                        "input": {"title": "Demo", "plan": "Create one HTML file."},
+                    }],
+                }
+            )
+            return
+        if self.calls == 2:
+            yield ToolUseReady(
+                message={
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "stub",
+                        "input": {"x": "ok"},
+                    }],
+                }
+            )
+            return
+        yield TurnEnd(
+            stop_reason="end_turn",
+            message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        )
+
+
+def test_present_plan_runs_for_simple_artifact_request(monkeypatch, workspace):
+    provider = _PlanThenToolProvider()
+    runtime.configure(provider, str(workspace), session=None)
+    tool = Tool(
+        name="stub",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=lambda args: f"ran {args['x']}",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    messages = [{"role": "user", "content": "make me a super advanced html and open it"}]
+    loop._run_until_done(provider, messages, 0, 0, render=False)
+
+    assert provider.calls == 3
+    assert any(
+        block.get("tool_use_id") == "plan_1"
+        and "approved. proceed" in block.get("content", "")
+        for msg in messages
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        if isinstance(block, dict)
+    )
+
+
+def test_artifact_request_shows_real_stream_activity(monkeypatch, workspace):
+    provider = _FakeProvider()
+    runtime.configure(provider, str(workspace), session=None)
+    seen: list[str] = []
+
+    monkeypatch.setattr(loop.ui, "activity", lambda label: seen.append(label))
+    monkeypatch.setattr(loop.ui, "tool_progress_clear", lambda: None)
+
+    loop._stream_one_turn(
+        provider,
+        messages=[{"role": "user", "content": "make me an animated html"}],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=True,
+    )
+
+    assert "waiting for provider response" in seen
+    assert "receiving text stream" in seen
+    assert "tool call ready" in seen
+
+
+def test_real_stream_activity_survives_after_plan_approval(monkeypatch, workspace):
+    provider = _FakeProvider()
+    runtime.configure(provider, str(workspace), session=None)
+    seen: list[str] = []
+
+    monkeypatch.setattr(loop.ui, "activity", lambda label: seen.append(label))
+    monkeypatch.setattr(loop.ui, "tool_progress_clear", lambda: None)
+
+    loop._stream_one_turn(
+        provider,
+        messages=[
+            {"role": "user", "content": "make me an animated html and open it"},
+            {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "plan_1",
+                    "name": "present_plan",
+                    "input": {"title": "Demo", "plan": "Create one HTML file."},
+                }],
+            },
+            {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "plan_1",
+                    "content": "approved. proceed with execution.",
+                }],
+            },
+        ],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=True,
+    )
+
+    assert "waiting for provider response" in seen
+    assert "receiving text stream" in seen
+    assert "tool call ready" in seen

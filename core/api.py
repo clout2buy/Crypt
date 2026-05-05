@@ -45,13 +45,27 @@ class ThinkingDelta:
 
 
 @dataclass
-class TurnEnd:
-    stop_reason: str
+class ToolUseProgress:
+    name: str
+    call_id: str = ""
+    argument_chars: int = 0
+
+
+@dataclass
+class ToolUseReady:
     message: dict
     usage: dict | None = None
 
 
-Event = TextDelta | ThinkingDelta | TurnEnd
+@dataclass
+class TurnEnd:
+    stop_reason: str
+    message: dict
+    usage: dict | None = None
+    text_buffered: bool = False
+
+
+Event = TextDelta | ThinkingDelta | ToolUseProgress | ToolUseReady | TurnEnd
 
 
 class Provider(Protocol):
@@ -208,21 +222,9 @@ class AnthropicProvider:
                         else:
                             yield ev
 
-        # Drop thinking blocks from persisted history. Anthropic requires
-        # a `signature` field on round-tripped thinking blocks (delivered
-        # via signature_delta), and re-sending without it 400s on the next
-        # turn. Match MrDoing: stream thinking to the UI, never persist it.
-        content = [b for b in content_blocks if b and b.get("type") != "thinking"]
-        for blk in content:
-            if blk.get("type") == "tool_use":
-                raw = blk.pop("_partial_json", "")
-                try:
-                    blk["input"] = json.loads(raw) if raw else {}
-                except json.JSONDecodeError:
-                    blk["input"] = {}
         yield TurnEnd(
             stop_reason=stop_reason,
-            message={"role": "assistant", "content": content},
+            message=_finalized_assistant_message(content_blocks),
             usage=usage,
         )
 
@@ -276,6 +278,11 @@ def _process_event(event_type, data, content_blocks, usage):
                 "input": {},
                 "_partial_json": "",
             }
+            yield ToolUseProgress(
+                name=content_blocks[index]["name"],
+                call_id=content_blocks[index]["id"],
+                argument_chars=0,
+            )
         return
 
     if event_type == "content_block_delta":
@@ -299,6 +306,27 @@ def _process_event(event_type, data, content_blocks, usage):
         elif dtype == "input_json_delta":
             partial = delta.get("partial_json", "")
             block["_partial_json"] = block.get("_partial_json", "") + partial
+            yield ToolUseProgress(
+                name=str(block.get("name") or "?"),
+                call_id=str(block.get("id") or ""),
+                argument_chars=len(str(block.get("_partial_json") or "")),
+            )
+        return
+
+    if event_type == "content_block_stop":
+        try:
+            index = int(data.get("index", 0))
+        except (TypeError, ValueError):
+            return
+        if index < 0 or index >= len(content_blocks) or content_blocks[index] is None:
+            return
+        block = content_blocks[index]
+        if block.get("type") == "tool_use" and not block.get("_ready_sent"):
+            block["_ready_sent"] = True
+            yield ToolUseReady(
+                message=_finalized_assistant_message(content_blocks),
+                usage=dict(usage),
+            )
         return
 
     if event_type == "message_delta":
@@ -313,6 +341,30 @@ def _process_event(event_type, data, content_blocks, usage):
     if event_type == "error":
         err = data.get("error") or {}
         raise RuntimeError(f"stream error: {err.get('message') or err}")
+
+
+def _finalized_assistant_message(content_blocks: list[dict | None]) -> dict:
+    # Drop thinking blocks from persisted history. Anthropic requires a
+    # signature on round-tripped thinking blocks; the UI may show them, but
+    # the transcript should not resend them.
+    content: list[dict] = []
+    for block in content_blocks:
+        if not block or block.get("type") == "thinking":
+            continue
+        clean = {
+            key: value
+            for key, value in block.items()
+            if not key.startswith("_")
+        }
+        if clean.get("type") == "tool_use":
+            raw = block.get("_partial_json", "")
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            clean["input"] = parsed if isinstance(parsed, dict) else {}
+        content.append(clean)
+    return {"role": "assistant", "content": content}
 
 
 def _mark_cache_breakpoint(block: dict) -> dict:
@@ -499,22 +551,31 @@ class OpenAIProvider:
                             slot["name"] = fn["name"]
                         if fn.get("arguments"):
                             slot["arguments"] += fn["arguments"]
+                        if slot.get("name"):
+                            yield ToolUseProgress(
+                                name=slot["name"],
+                                call_id=slot.get("id", ""),
+                                argument_chars=len(slot.get("arguments") or ""),
+                            )
+                        ready = _openai_tool_block(idx, slot)
+                        if ready is not None:
+                            content: list[dict] = []
+                            if text_buf:
+                                content.append({"type": "text", "text": "".join(text_buf)})
+                            content.append(ready)
+                            yield ToolUseReady(
+                                message={"role": "assistant", "content": content}
+                            )
+                            return
 
         content: list[dict] = []
         if text_buf:
             content.append({"type": "text", "text": "".join(text_buf)})
         for idx in sorted(tool_calls):
             slot = tool_calls[idx]
-            try:
-                args_obj = json.loads(slot["arguments"]) if slot["arguments"] else {}
-            except json.JSONDecodeError:
-                args_obj = {}
-            content.append({
-                "type": "tool_use",
-                "id": slot["id"] or f"call_{idx}",
-                "name": slot["name"] or "?",
-                "input": args_obj,
-            })
+            block = _openai_tool_block(idx, slot, allow_incomplete=True)
+            if block is not None:
+                content.append(block)
 
         # Map OpenAI finish_reason onto our internal stop_reason vocabulary
         # so the loop's max_tokens-escalate path keeps working uniformly.
@@ -552,6 +613,34 @@ class OpenAIProvider:
     def _is_reasoning_model(self) -> bool:
         m = self.model.lower()
         return m.startswith("o1") or m.startswith("o3") or m.startswith("o4")
+
+
+def _openai_tool_block(
+    idx: int,
+    slot: dict,
+    *,
+    allow_incomplete: bool = False,
+) -> dict | None:
+    name = slot.get("name") or ""
+    if not name:
+        return None
+    raw = slot.get("arguments") or ""
+    if not raw and not allow_incomplete:
+        return None
+    try:
+        args_obj = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        if not allow_incomplete:
+            return None
+        args_obj = {}
+    if not isinstance(args_obj, dict):
+        args_obj = {}
+    return {
+        "type": "tool_use",
+        "id": slot.get("id") or f"call_{idx}",
+        "name": name,
+        "input": args_obj,
+    }
 
 
 def _to_openai_messages(messages: list[dict]) -> list[dict]:
@@ -623,102 +712,145 @@ def _to_openai_messages(messages: list[dict]) -> list[dict]:
 
 
 class OllamaProvider:
+    """Ollama via the official Anthropic SDK.
+
+    Ollama natively serves Anthropic's /v1/messages API, which is how
+    Claude Code talks to it. We use the `anthropic` SDK with `base_url`
+    pointed at Ollama so we inherit the SDK's:
+
+      - Battle-tested SSE streaming + event parsing.
+      - 2x exponential-backoff retry on connection / 5xx errors.
+      - Sane default timeouts (10 minutes total, configurable via env).
+      - Tool-use semantics (content_block_start + input_json_delta + stop).
+
+    Auth: Authorization: Bearer <token>. Local Ollama accepts the literal
+    string ``ollama``; cloud Ollama wants a real key from $OLLAMA_API_KEY.
+
+    Streaming events from the SDK are Pydantic models; we ``model_dump()``
+    them into plain dicts and feed through Crypt's shared ``_process_event``
+    so the rest of the harness sees the same internal events as on the
+    Anthropic path (TextDelta, ThinkingDelta, ToolUseProgress, ToolUseReady,
+    TurnEnd).
+    """
+
     name = "ollama"
-    context_window = 128_000
+    context_window = 256_000
     is_oauth = False
 
     def __init__(
         self,
         model: str = OLLAMA_MODEL,
         host: str | None = None,
-        think: bool = True,
+        think: bool = True,  # kept for signature compat with /model switcher
     ) -> None:
-        from ollama import Client
+        from anthropic import Anthropic
 
-        api_key = os.getenv("OLLAMA_API_KEY")
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
-        self._client = Client(host=host or os.getenv("OLLAMA_HOST"), headers=headers)
+        self._base_url = _normalize_ollama_host(
+            host or os.getenv("OLLAMA_HOST") or "http://localhost:11434"
+        )
+        api_key = os.getenv("OLLAMA_API_KEY") or "ollama"
+        try:
+            timeout = float(os.getenv("OLLAMA_TIMEOUT", "600"))
+        except ValueError:
+            timeout = 600.0
+        try:
+            # Bumped 8192 → 16384 so a single write_file with a 300+ line
+            # artifact doesn't truncate and force the agent to retry.
+            self._max_tokens = int(os.getenv("OLLAMA_MAX_TOKENS", "16384"))
+        except ValueError:
+            self._max_tokens = 16384
+        # Thinking-capable models (Qwen3, Kimi K2, GLM, DeepSeek) emit a
+        # `thinking` content block when this is configured. Set to 0 in
+        # the env to disable for non-thinking models.
+        try:
+            self._thinking_budget = int(os.getenv("OLLAMA_THINKING_BUDGET", "8000"))
+        except ValueError:
+            self._thinking_budget = 8000
+        # Anthropic's API rejects budget >= max_tokens; leave room for the
+        # actual response.
+        if self._thinking_budget >= self._max_tokens:
+            self._thinking_budget = max(0, self._max_tokens - 2048)
+
+        self._client = Anthropic(
+            api_key=api_key,
+            base_url=self._base_url,
+            timeout=timeout,
+        )
         self.model = model
         self.host = host
         self._think = think
 
     def stream_turn(self, messages, tools, system):
-        text: list[str] = []
-        calls: list[dict] = []
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": self._max_tokens,
+            "system": system,
+            "messages": messages,
+            "stream": True,
+        }
+        if self._thinking_budget > 0 and self._think:
+            kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self._thinking_budget,
+            }
+        if tools:
+            # Tools use Anthropic's native shape — Crypt's tool registry
+            # already produces this; no translation needed.
+            kwargs["tools"] = [
+                {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "input_schema": tool["input_schema"],
+                }
+                for tool in tools
+            ]
 
-        for chunk in self._client.chat(
-            model=self.model,
-            messages=_to_ollama(messages, system),
-            tools=[_to_openai_tool(t) for t in tools] if tools else None,
-            stream=True,
-            think=self._think,
-        ):
-            msg = chunk.get("message") or {}
-            if msg.get("thinking"):
-                yield ThinkingDelta(msg["thinking"])
-            if msg.get("content"):
-                yield TextDelta(msg["content"])
-                text.append(msg["content"])
-            calls.extend(msg.get("tool_calls") or [])
+        content_blocks: list[dict | None] = []
+        usage: dict = {"input_tokens": 0, "output_tokens": 0}
+        stop_reason = "end_turn"
 
-        content = []
-        if text:
-            content.append({"type": "text", "text": "".join(text)})
-        content.extend(_to_anthropic_call(call, i) for i, call in enumerate(calls))
+        stream = self._client.messages.create(**kwargs)
+        for event in stream:
+            event_type = getattr(event, "type", None)
+            if not event_type:
+                continue
+            # SDK events are Pydantic models; convert to dicts so the
+            # shared event processor can read them like raw SSE payloads.
+            data = event.model_dump() if hasattr(event, "model_dump") else dict(event)
+            for ev in _process_event(event_type, data, content_blocks, usage):
+                if isinstance(ev, _StopReason):
+                    stop_reason = ev.value
+                else:
+                    yield ev
 
         yield TurnEnd(
-            stop_reason="tool_use" if calls else "end_turn",
-            message={"role": "assistant", "content": content},
+            stop_reason=stop_reason,
+            message=_finalized_assistant_message(content_blocks),
+            usage=usage,
         )
 
 
-def _to_anthropic_call(call: dict, index: int) -> dict:
-    fn = call.get("function", {})
-    args = fn.get("arguments", {})
-    if isinstance(args, str):
-        args = json.loads(args)
-    return {
-        "type": "tool_use",
-        "id": call.get("id") or f"call_{index}",
-        "name": fn.get("name", ""),
-        "input": args,
-    }
+def _normalize_ollama_host(host: str) -> str:
+    """Coerce common host strings into a real client URL.
 
-
-def _to_ollama(messages: list[dict], system: str) -> list[dict]:
-    out: list[dict] = [{"role": "system", "content": system}]
-    for msg in messages:
-        content = msg["content"]
-        if isinstance(content, str):
-            out.append({"role": msg["role"], "content": content})
-            continue
-
-        text: list[str] = []
-        calls: list[dict] = []
-        for block in content:
-            kind = block.get("type")
-            if kind == "text":
-                text.append(block["text"])
-            elif kind == "tool_use":
-                calls.append({
-                    "id": block.get("id", ""),
-                    "type": "function",
-                    "function": {"name": block["name"], "arguments": block["input"]},
-                })
-            elif kind == "tool_result":
-                result = block.get("content", "")
-                out.append({
-                    "role": "tool",
-                    "content": result if isinstance(result, str) else json.dumps(result),
-                    "tool_call_id": block.get("tool_use_id", ""),
-                })
-
-        if text or calls:
-            item = {"role": msg["role"], "content": "".join(text)}
-            if calls:
-                item["tool_calls"] = calls
-            out.append(item)
-    return out
+    Users (and Ollama itself) sometimes set OLLAMA_HOST to a listening
+    address like ``0.0.0.0`` or a bare ``localhost``. httpx needs a real
+    base URL; this fills in the gaps without surprising the user.
+    """
+    host = host.strip().rstrip("/")
+    if not host:
+        return "http://localhost:11434"
+    if not host.startswith(("http://", "https://")):
+        host = f"http://{host}"
+    # 0.0.0.0 is a listening address, not a client target.
+    host = host.replace("//0.0.0.0", "//localhost")
+    # Add Ollama's default port for local-style hosts that omit it.
+    # urlparse's port attribute returns None when no explicit port is set.
+    import urllib.parse as _u
+    parsed = _u.urlparse(host)
+    if parsed.port is None and parsed.hostname in ("localhost", "127.0.0.1", "::1"):
+        host = f"{parsed.scheme}://{parsed.hostname}:11434{parsed.path or ''}"
+    return host
 
 
 def _to_openai_tool(tool: dict) -> dict:

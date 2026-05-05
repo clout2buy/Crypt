@@ -74,11 +74,18 @@ _state = {
     "loader_start": 0.0,    # monotonic clock when current turn started
     "loader_tokens": 0,     # base token count for the running loader
     "todos": [],            # current todo list (mirrored from todos tool)
+    "tool_progress": None,  # current streaming tool-call assembly state
+    "activity": "idle",     # last real observed harness/provider state
+    "stream_kind": "",      # current streamed provider payload type
+    "stream_chars": 0,      # exact chars received for the current stream kind
     "pipe": None,           # typewriter pipe (when streaming text/thinking)
+    # Per-tool lifecycle entries shown in the live region while a tool is
+    # in flight. Mirrors the shape of Claude Code's inProgressToolUseIDs:
+    # each tool gets its own animated row (queued → running/approval → ok/err).
+    "tool_lifecycle": {},   # tool_use_id -> {name, summary, state, detail, started_at}
+    "tool_lifecycle_order": [],  # render order; preserved across state changes
 }
 
-_WAVE = "▁▂▃▄▅▆▇█▇▆▅▄▃▂▁"
-_VERBS = ("thinking", "reading", "planning", "writing", "checking", "working")
 _TODO_DWELL_SECONDS = 0.75
 
 
@@ -120,6 +127,17 @@ def _fmt_tokens(n: int) -> str:
     return f"{n}"
 
 
+def _fmt_bytes(n: int) -> str:
+    n = max(0, int(n or 0))
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f} MB"
+    if n >= 10_000:
+        return f"{n / 1_000:.0f} KB"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f} KB"
+    return f"{n} B"
+
+
 def _ctx_color(pct: int) -> str:
     if pct < 50:
         return ACCENT
@@ -152,20 +170,64 @@ def _elapsed() -> int:
     return max(1, int(time.monotonic() - start))
 
 
+# Braille spinner — 10 frames, advances every ~100ms at our 8 fps refresh.
+# The point is to give the user proof-of-life motion even when no chunks
+# are arriving (e.g. Ollama is silent while the model composes a long
+# tool_call internally — Crypt has nothing to render but the spinner says
+# "still alive").
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _spinner_frame() -> str:
+    """Return the spinner glyph for the current monotonic time."""
+    return _SPINNER_FRAMES[int(time.monotonic() * 10) % len(_SPINNER_FRAMES)]
+
+
 def _build_status() -> Text:
     elapsed = _elapsed() or 1
-    offset = (elapsed * 4) % len(_WAVE)
-    wave = (_WAVE + _WAVE)[offset : offset + 14]
-    verb = _VERBS[(elapsed // 2) % len(_VERBS)]
-
+    activity = str(_state.get("activity") or "waiting")
+    stream_kind = str(_state.get("stream_kind") or "")
+    stream_chars = int(_state.get("stream_chars") or 0)
     t = Text("  ")
-    t.append(wave, style=ACCENT)
-    t.append("  ")
-    t.append(verb, style=MUTED)
+    # Animated spinner instead of a static arrow: the user sees the prefix
+    # advance every refresh, so a long silent generation phase doesn't read
+    # as a frozen UI.
+    t.append(_spinner_frame() + " ", style=ACCENT)
+    t.append(_trim(activity, max(16, console.size.width - 42)), style=MUTED)
     t.append(f"  ({elapsed}s", style=FAINT)
+    if stream_chars:
+        t.append(f" · ↓ {_fmt_bytes(stream_chars)}", style=FAINT)
+        if stream_kind:
+            t.append(f" {stream_kind}", style=FAINT)
     if _state["loader_tokens"]:
         t.append(f" · {_state['loader_tokens']:,} tok", style=FAINT)
     t.append(")", style=FAINT)
+    # If no chunks have arrived after 15 seconds, surface an abort hint.
+    # Big cloud models (Qwen3-coder:480b, etc.) can take 30-120s to prefill
+    # a long system+tools prompt — the wait is real, but the user should
+    # know they can ctrl+C or /model out at any time.
+    if stream_chars == 0 and elapsed >= 15:
+        t.append("  · Ctrl+C to abort · /model to switch", style=WARN)
+    return t
+
+
+def _build_tool_progress() -> Text | None:
+    progress = _state.get("tool_progress")
+    if not progress:
+        return None
+    width = console.size.width
+    name = _trim(progress.get("name") or "tool", 28)
+    chars = int(progress.get("argument_chars") or 0)
+    call_id = str(progress.get("call_id") or "")
+    label = f"assembling {name}"
+    if chars:
+        label += f" args {_fmt_bytes(chars)}"
+
+    t = Text("  ")
+    t.append("▸ ", style=ACCENT)
+    t.append(_trim(label, max(12, width - 8)), style=f"bold {INK}")
+    if call_id:
+        t.append(f" · {call_id[:10]}", style=FAINT)
     return t
 
 
@@ -216,10 +278,189 @@ def _build_todos_block() -> RenderableType | None:
     return Group(*rows)
 
 
+# ─── tool lifecycle ─────────────────────────────────────────────────────
+# State machine (mirrors Claude Code's tool states):
+#   queued    — header printed, dispatch hasn't started yet
+#   approval  — waiting for the user's y/N
+#   running   — tool.run() is executing
+#   ok / err  — terminal; row leaves the live region and a final
+#               "└─ ✓ ok (1.2s)" / "└─ ✗ failed (0.3s)" stamp lands in scrollback.
+#
+# Bullet glyph + color per state. The detail string is the default child
+# label when no caller-supplied detail is given.
+_BULLET_BY_STATE = {
+    "queued":   ("○", FAINT,  "queued"),
+    "approval": ("●", WARN,   "awaiting approval"),
+    "running":  ("●", WARN,   "running"),
+    "ok":       ("✓", ACCENT, "ok"),
+    "err":      ("✗", ERR,    "failed"),
+}
+
+
+def _blink_bullet(bullet: str, state: str) -> str:
+    """Blink the bullet for active states so the user sees motion at 4 fps."""
+    if state in ("approval", "running"):
+        # ~2 Hz toggle: visible on, then off, then on...
+        if int(time.monotonic() * 2) % 2 == 0:
+            return " "
+    return bullet
+
+
+def _elapsed_since(entry: dict) -> float:
+    """Wall-clock time since this tool actually started running.
+
+    The displayed timer must reflect *execution* time, not queue + approval
+    typing time — otherwise a fast tool that sits 5s at an approval prompt
+    looks like it took 5s to run. We use ``running_at`` when set (post-
+    approval) and fall back to ``started_at`` for tools that never reached
+    the running phase (denied / validation failed).
+    """
+    ref = entry.get("running_at") or entry.get("started_at")
+    if not ref:
+        return 0.0
+    return max(0.0, time.monotonic() - ref)
+
+
+def _build_in_flight_tools() -> RenderableType | None:
+    """Render the live row for each tool currently in flight."""
+    order = _state.get("tool_lifecycle_order") or []
+    lifecycle = _state.get("tool_lifecycle") or {}
+    rows: list[Text] = []
+    for tid in order:
+        entry = lifecycle.get(tid)
+        if not entry:
+            continue
+        bullet, color, default_detail = _BULLET_BY_STATE.get(
+            entry.get("state", "queued"), _BULLET_BY_STATE["queued"]
+        )
+        bullet = _blink_bullet(bullet, entry.get("state", "queued"))
+        detail = entry.get("detail") or default_detail
+        elapsed = int(_elapsed_since(entry))
+        t = Text("    ")
+        t.append("└─ ", style=FAINT)
+        t.append(bullet + " ", style=f"bold {color}")
+        t.append(_trim(detail, 38), style=MUTED)
+        if elapsed >= 1:
+            t.append(f"  ({elapsed}s)", style=FAINT)
+        rows.append(t)
+    return Group(*rows) if rows else None
+
+
+def _refresh_live() -> None:
+    """Push a fresh frame to the live region, if it's running."""
+    live = _state.get("live")
+    if live is not None:
+        live.update(_LiveRenderable(), refresh=True)
+
+
+def tool_begin(tool_id: str, name: str, summary: str) -> None:
+    """Print the tool header line and register an in-flight row.
+
+    The header (`▸ name  summary`) goes straight to scrollback so it stays
+    pinned in the transcript above the live region. The in-flight row in
+    the live region is what animates while the tool runs.
+    """
+    if not tool_id:
+        # Backward compat for callers without a tool_use_id.
+        tool_call(name, summary)
+        return
+    width = console.size.width
+    t = Text("  ")
+    t.append("▸ ", style=ACCENT)
+    t.append(name, style=INK)
+    t.append("  ")
+    t.append(_trim(summary, max(8, width - len(name) - 8)), style=MUTED)
+    console.print(t)
+
+    _state.setdefault("tool_lifecycle", {})
+    _state.setdefault("tool_lifecycle_order", [])
+    _state["tool_lifecycle"][tool_id] = {
+        "name": name,
+        "summary": summary,
+        "state": "queued",
+        "detail": "",
+        "started_at": time.monotonic(),
+    }
+    if tool_id not in _state["tool_lifecycle_order"]:
+        _state["tool_lifecycle_order"].append(tool_id)
+    _refresh_live()
+
+
+def tool_set_state(tool_id: str, state: str, detail: str = "") -> None:
+    """Move a tracked tool to a new state; refresh the live row."""
+    if not tool_id:
+        return
+    entry = (_state.get("tool_lifecycle") or {}).get(tool_id)
+    if entry is None:
+        return
+    entry["state"] = state
+    if detail:
+        entry["detail"] = detail
+    elif state in _BULLET_BY_STATE:
+        entry["detail"] = _BULLET_BY_STATE[state][2]
+    # Stamp the running clock once: this is what the displayed timer should
+    # measure. Approval typing time stays out of the elapsed counter.
+    if state == "running" and "running_at" not in entry:
+        entry["running_at"] = time.monotonic()
+    _refresh_live()
+
+
+def tool_end(tool_id: str, ok: bool, output: str = "") -> None:
+    """Finalize a tool: print result body + a `└─ ✓/✗` footer; drop from live.
+
+    Visual shape (success):
+        ▸ bash  echo hi
+            hi
+            └─ ✓ ok  (0.2s)
+
+    Visual shape (failure):
+        ▸ bash  bogus
+          ! command not found
+            └─ ✗ failed  (0.1s)
+    """
+    if not tool_id:
+        tool_result(ok, output)
+        return
+    lifecycle = _state.get("tool_lifecycle") or {}
+    entry = lifecycle.pop(tool_id, None)
+    order = _state.get("tool_lifecycle_order") or []
+    if tool_id in order:
+        order.remove(tool_id)
+
+    if output:
+        tool_result(ok, output)
+
+    if entry is not None:
+        elapsed = _elapsed_since(entry)
+        bullet = "✓" if ok else "✗"
+        color = ACCENT if ok else ERR
+        label = "ok" if ok else "failed"
+        line = Text("    ")
+        line.append("└─ ", style=FAINT)
+        line.append(bullet + " ", style=f"bold {color}")
+        line.append(label, style=color)
+        line.append(f"  ({elapsed:.1f}s)", style=FAINT)
+        console.print(line)
+    _refresh_live()
+
+
+def tool_lifecycle_clear() -> None:
+    """Drop any leftover lifecycle entries (defensive end-of-turn cleanup)."""
+    _state["tool_lifecycle"] = {}
+    _state["tool_lifecycle_order"] = []
+    _refresh_live()
+
+
 class _LiveRenderable:
     """Rebuilt by Rich on each refresh — pulls fresh state."""
     def __rich__(self) -> RenderableType:
         parts: list[RenderableType] = []
+        in_flight = _build_in_flight_tools()
+        if in_flight is not None:
+            parts.append(in_flight)
+        progress = _build_tool_progress()
+        if progress is not None:
+            parts.append(progress)
         todos = _build_todos_block()
         if todos is not None:
             parts.append(todos)
@@ -234,7 +475,9 @@ def _live_start() -> None:
     live = Live(
         _LiveRenderable(),
         console=console,
-        refresh_per_second=4,
+        # 8 fps: smooth enough that the per-tool bullet blink reads as
+        # animation, low enough that idle CPU stays negligible.
+        refresh_per_second=8,
         transient=True,
     )
     live.start(refresh=True)
@@ -319,16 +562,21 @@ class _Typewriter:
                 if ch is None:
                     break
                 self._on_char(ch)
-                # Adaptive: faster when backlog grows.
+                # Adaptive cadence. The typewriter only exists to *smooth
+                # bursts* — when chunks arrive in a steady drip (Qwen
+                # Cloud's small-chunk pattern), we should not throttle.
+                # Old base delay (12 ms) capped output at ~83 chars/sec
+                # which made small-chunk providers feel sluggish.
                 if backlog > 400:
-                    delay = 0.0008
+                    delay = 0.0
                 elif backlog > 120:
-                    delay = 0.003
+                    delay = 0.0005
                 elif backlog > 30:
-                    delay = 0.006
+                    delay = 0.002
                 else:
-                    delay = 0.012
-                time.sleep(delay)
+                    delay = 0.004  # ~250 chars/sec at low backlog
+                if delay:
+                    time.sleep(delay)
 
 
 def _emit_with_rail(rail: Text, ch: str, ink_style: str) -> None:
@@ -857,6 +1105,21 @@ def tool_call(name: str, summary: str) -> None:
     console.print(t)
 
 
+def tool_status(label: str, *, ok: bool | None = None) -> None:
+    style = MUTED
+    marker_style = FAINT
+    if ok is True:
+        style = ACCENT
+        marker_style = ACCENT
+    elif ok is False:
+        style = ERR
+        marker_style = ERR
+    t = Text("    ")
+    t.append("└ ", style=marker_style)
+    t.append(_trim(label, console.size.width - 8), style=style)
+    console.print(t)
+
+
 def tool_result(ok: bool, output: str = "") -> None:
     text = (output or "").rstrip()
     if not text or text == "(no output)":
@@ -881,6 +1144,53 @@ def tool_result(ok: bool, output: str = "") -> None:
 
 
 # ─── panels ─────────────────────────────────────────────────────────────
+def tool_progress(name: str, *, argument_chars: int = 0, call_id: str = "") -> None:
+    _state["tool_progress"] = {
+        "name": name,
+        "argument_chars": max(0, int(argument_chars or 0)),
+        "call_id": call_id,
+    }
+    live = _state["live"]
+    if live is not None:
+        live.update(_LiveRenderable(), refresh=True)
+
+
+def tool_progress_clear() -> None:
+    if not _state.get("tool_progress"):
+        return
+    _state["tool_progress"] = None
+    live = _state["live"]
+    if live is not None:
+        live.update(_LiveRenderable(), refresh=True)
+
+
+def activity(label: str) -> None:
+    _state["activity"] = str(label or "waiting")
+    live = _state["live"]
+    if live is not None and _state.get("tool_progress") is None:
+        live.update(_LiveRenderable(), refresh=True)
+
+
+def stream_delta(kind: str, text: str) -> None:
+    kind = str(kind or "stream")
+    if _state.get("stream_kind") != kind:
+        _state["stream_kind"] = kind
+        _state["stream_chars"] = 0
+    _state["stream_chars"] = int(_state.get("stream_chars") or 0) + len(text or "")
+    _state["activity"] = f"receiving {kind} stream"
+    live = _state["live"]
+    if live is not None and _state.get("tool_progress") is None:
+        live.update(_LiveRenderable(), refresh=True)
+
+
+def stream_clear() -> None:
+    _state["stream_kind"] = ""
+    _state["stream_chars"] = 0
+    live = _state["live"]
+    if live is not None and _state.get("tool_progress") is None:
+        live.update(_LiveRenderable(), refresh=True)
+
+
 def todos_panel(items: list[dict]) -> None:
     """Mirror the model's todos into the live region.
 
@@ -1058,7 +1368,15 @@ class Loader:
     def start(self) -> None:
         _state["loader_start"] = time.monotonic()
         _state["loader_tokens"] = self._base
+        _state["tool_progress"] = None
+        _state["activity"] = "request sent"
+        _state["stream_kind"] = ""
+        _state["stream_chars"] = 0
         _live_start()
 
     def stop(self) -> None:
         _live_stop(render_todos=bool(_state["todos"]))
+        # Defensive end-of-turn cleanup: if a tool was in flight when the
+        # turn aborted (KeyboardInterrupt, exception), its row would
+        # otherwise leak into the next turn's live region.
+        tool_lifecycle_clear()

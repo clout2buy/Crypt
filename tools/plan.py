@@ -63,6 +63,8 @@ def run(args: dict) -> str:
         return "present_plan: plan is required"
 
     ui.plan_panel(title, plan)
+    if not runtime.render_tools():
+        return "approved. proceed with execution."
     if runtime.can_auto_approve_plan():
         ui.info("approval mode yolo-all - auto-approving plan")
         return "approved. proceed with execution."

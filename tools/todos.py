@@ -92,6 +92,15 @@ def get_todos() -> list[dict]:
     return list(_TODOS)
 
 
+def complete_all() -> bool:
+    if not _TODOS or all(t.get("status") == "done" for t in _TODOS):
+        return False
+    for item in _TODOS:
+        item["status"] = "done"
+    ui.todos_panel(_TODOS)
+    return True
+
+
 def run(args: dict) -> str:
     items = args.get("todos") or []
     cleaned: list[dict] = []

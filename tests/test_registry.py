@@ -40,6 +40,53 @@ def test_missing_required_arg(monkeypatch):
     assert "missing required input" in msg
 
 
+def test_non_object_tool_input_is_rejected(monkeypatch):
+    tool = _stub_tool(permission="auto")
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+    ok, msg = registry.dispatch(tool.name, ["not", "an", "object"], render=False)
+    assert ok is False
+    assert "expected JSON object" in msg
+
+
+def test_schema_validation_rejects_wrong_type(monkeypatch):
+    tool = _stub_tool(permission="auto")
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+    ok, msg = registry.dispatch(tool.name, {"x": 123}, render=False)
+    assert ok is False
+    assert "schema validation failed" in msg
+    assert "x: expected string" in msg
+
+
+def test_schema_validation_checks_nested_enum(monkeypatch):
+    tool = Tool(
+        name="nested",
+        description="nested",
+        schema={
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "status": {"type": "string", "enum": ["pending", "done"]},
+                        },
+                        "required": ["status"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+        permission="auto",
+        run=lambda args: "ran",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+    ok, msg = registry.dispatch(tool.name, {"items": [{"status": "doing"}]}, render=False)
+    assert ok is False
+    assert "items[0].status" in msg
+    assert "expected one of" in msg
+
+
 def test_auto_tool_runs_without_prompt(monkeypatch):
     tool = _stub_tool(permission="auto")
     monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
@@ -98,3 +145,118 @@ def test_run_exception_surfaces_as_failure(monkeypatch):
     assert ok is False
     assert "RuntimeError" in msg
     assert "boom" in msg
+
+
+# ─── lifecycle UI integration ───────────────────────────────────────────
+
+
+class _LifecycleSpy:
+    """Captures every UI lifecycle call made during dispatch."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, ...]] = []
+
+    def install(self, monkeypatch):
+        from core import ui
+
+        monkeypatch.setattr(ui, "tool_begin", lambda tid, name, summary:
+                            self.events.append(("begin", tid, name, summary)))
+        monkeypatch.setattr(ui, "tool_set_state", lambda tid, state, detail="":
+                            self.events.append(("state", tid, state, detail)))
+        monkeypatch.setattr(ui, "tool_end", lambda tid, ok, output="":
+                            self.events.append(("end", tid, ok, output)))
+        # Quiet-mode legacy paths shouldn't fire when tool_use_id is set, but
+        # spy on them so a regression here shows up clearly.
+        monkeypatch.setattr(ui, "tool_call", lambda name, summary:
+                            self.events.append(("legacy_call", name, summary)))
+        monkeypatch.setattr(ui, "tool_result", lambda ok, output="":
+                            self.events.append(("legacy_result", ok, output)))
+        monkeypatch.setattr(ui, "activity", lambda label: None)
+        monkeypatch.setattr(ui, "info", lambda label: None)
+
+
+def test_dispatch_with_tool_use_id_emits_begin_running_end(monkeypatch):
+    spy = _LifecycleSpy()
+    spy.install(monkeypatch)
+    tool = _stub_tool(permission="auto")
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    ok, _ = registry.dispatch(tool.name, {"x": "hi"}, render=True, tool_use_id="call_1")
+
+    assert ok is True
+    kinds = [e[0] for e in spy.events]
+    assert kinds == ["begin", "state", "end"]
+    assert spy.events[0] == ("begin", "call_1", "stub", "hi")
+    assert spy.events[1] == ("state", "call_1", "running", "")
+    end = spy.events[2]
+    assert end[0] == "end" and end[1] == "call_1" and end[2] is True
+
+
+def test_dispatch_validation_failure_uses_lifecycle_path(monkeypatch):
+    spy = _LifecycleSpy()
+    spy.install(monkeypatch)
+    tool = _stub_tool(permission="auto")
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    ok, msg = registry.dispatch(tool.name, {"x": 123}, render=True, tool_use_id="call_1")
+
+    assert ok is False
+    assert "schema validation failed" in msg
+    # Begin then end err — no legacy calls, no running state.
+    kinds = [e[0] for e in spy.events]
+    assert kinds == ["begin", "end"]
+    assert spy.events[1][2] is False  # ok=False
+
+
+def test_dispatch_non_object_input_uses_lifecycle_path(monkeypatch):
+    spy = _LifecycleSpy()
+    spy.install(monkeypatch)
+    tool = _stub_tool(permission="auto")
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    ok, _ = registry.dispatch(tool.name, ["not", "object"], render=True, tool_use_id="call_1")
+
+    assert ok is False
+    kinds = [e[0] for e in spy.events]
+    assert kinds == ["begin", "end"]
+    # Header summary should call out the bad input.
+    assert spy.events[0][3] == "<invalid input>"
+
+
+def test_dispatch_run_exception_uses_lifecycle_path(monkeypatch):
+    spy = _LifecycleSpy()
+    spy.install(monkeypatch)
+
+    def bad_run(args):
+        raise RuntimeError("boom")
+    tool = _stub_tool(permission="auto", runner=bad_run)
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    ok, msg = registry.dispatch(tool.name, {"x": "hi"}, render=True, tool_use_id="call_1")
+
+    assert ok is False
+    assert "RuntimeError" in msg and "boom" in msg
+    # begin → running → end (err) — exception didn't skip the running phase.
+    kinds = [e[0] for e in spy.events]
+    assert kinds == ["begin", "state", "end"]
+    assert spy.events[1] == ("state", "call_1", "running", "")
+    assert spy.events[2][2] is False
+
+
+def test_dispatch_without_tool_use_id_uses_legacy_path(monkeypatch):
+    """Backward-compat: no tool_use_id → tool_call/tool_result, no lifecycle."""
+    spy = _LifecycleSpy()
+    spy.install(monkeypatch)
+    tool = _stub_tool(permission="auto")
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    ok, _ = registry.dispatch(tool.name, {"x": "hi"}, render=True)
+
+    assert ok is True
+    kinds = [e[0] for e in spy.events]
+    # Legacy: tool_call (start) then tool_result (end). No lifecycle calls.
+    assert "begin" not in kinds
+    assert "state" not in kinds
+    assert "end" not in kinds
+    assert "legacy_call" in kinds
+    assert "legacy_result" in kinds
