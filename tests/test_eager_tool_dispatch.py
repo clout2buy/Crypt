@@ -220,6 +220,22 @@ def test_anthropic_json_delta_emits_tool_progress():
     assert progress[-1].name == "write_file"
     assert progress[-1].call_id == "toolu_1"
     assert progress[-1].argument_chars == len('{"path":"demo.html"')
+    assert progress[-1].partial_json == '{"path":"demo.html"'
+
+
+def test_tool_progress_detail_surfaces_partial_write_file():
+    event = ToolUseProgress(
+        name="write_file",
+        call_id="toolu_1",
+        argument_chars=62,
+        partial_json='{"path":"demo.html","content":"<html>\\n<body>hi',
+    )
+
+    detail = loop._tool_progress_detail(event)
+
+    assert "demo.html" in detail
+    assert "2 line(s)" in detail
+    assert "chars" in detail
 
 
 class _TextThenToolProvider:

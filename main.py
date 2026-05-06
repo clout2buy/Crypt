@@ -36,8 +36,8 @@ def main() -> int:
     p.add_argument(
         "--show-thinking",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="display the model's raw thinking stream (default: on; pass --no-show-thinking to hide)",
+        default=False,
+        help="display the model's raw thinking stream (default: off; pass --show-thinking to show)",
     )
     p.add_argument("--no-thinking", action="store_true", help="disable extended thinking")
     p.add_argument("--no-picker", action="store_true", help="skip startup provider/model picker")

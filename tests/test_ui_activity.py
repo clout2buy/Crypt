@@ -217,3 +217,23 @@ def test_status_hides_abort_hint_once_chunks_arrive(monkeypatch):
         ui._state["loader_start"] = 0.0
         ui._state["activity"] = "idle"
         ui._state["stream_chars"] = 0
+
+
+def test_tool_progress_renders_detail():
+    try:
+        ui.tool_progress(
+            "write_file",
+            argument_chars=2048,
+            call_id="toolu_123456789",
+            detail="demo.html - 80 line(s), 4,200 chars",
+        )
+
+        rendered = ui._build_tool_progress()
+
+        assert rendered is not None
+        plain = rendered.plain
+        assert "assembling write_file" in plain
+        assert "demo.html" in plain
+        assert "80 line(s)" in plain
+    finally:
+        ui.tool_progress_clear()

@@ -49,6 +49,7 @@ class ToolUseProgress:
     name: str
     call_id: str = ""
     argument_chars: int = 0
+    partial_json: str = ""
 
 
 @dataclass
@@ -282,6 +283,7 @@ def _process_event(event_type, data, content_blocks, usage):
                 name=content_blocks[index]["name"],
                 call_id=content_blocks[index]["id"],
                 argument_chars=0,
+                partial_json="",
             )
         return
 
@@ -310,6 +312,7 @@ def _process_event(event_type, data, content_blocks, usage):
                 name=str(block.get("name") or "?"),
                 call_id=str(block.get("id") or ""),
                 argument_chars=len(str(block.get("_partial_json") or "")),
+                partial_json=str(block.get("_partial_json") or ""),
             )
         return
 
@@ -742,9 +745,9 @@ class OllamaProvider:
         # `thinking` content block when this is configured. Set to 0 in
         # the env to disable for non-thinking models.
         try:
-            self._thinking_budget = int(os.getenv("OLLAMA_THINKING_BUDGET", "8000"))
+            self._thinking_budget = int(os.getenv("OLLAMA_THINKING_BUDGET", "2048"))
         except ValueError:
-            self._thinking_budget = 8000
+            self._thinking_budget = 2048
         # Anthropic's API rejects budget >= max_tokens; leave room for the
         # actual response.
         if self._thinking_budget >= self._max_tokens:

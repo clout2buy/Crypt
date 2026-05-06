@@ -219,6 +219,7 @@ def _build_tool_progress() -> Text | None:
     name = _trim(progress.get("name") or "tool", 28)
     chars = int(progress.get("argument_chars") or 0)
     call_id = str(progress.get("call_id") or "")
+    detail = str(progress.get("detail") or "")
     label = f"assembling {name}"
     if chars:
         label += f" args {_fmt_bytes(chars)}"
@@ -228,6 +229,10 @@ def _build_tool_progress() -> Text | None:
     t.append(_trim(label, max(12, width - 8)), style=f"bold {INK}")
     if call_id:
         t.append(f" · {call_id[:10]}", style=FAINT)
+    if detail:
+        detail_row = Text("\n    ", style=FAINT)
+        detail_row.append(_trim(detail, max(12, width - 8)), style=MUTED)
+        t.append_text(detail_row)
     return t
 
 
@@ -1144,11 +1149,12 @@ def tool_result(ok: bool, output: str = "") -> None:
 
 
 # ─── panels ─────────────────────────────────────────────────────────────
-def tool_progress(name: str, *, argument_chars: int = 0, call_id: str = "") -> None:
+def tool_progress(name: str, *, argument_chars: int = 0, call_id: str = "", detail: str = "") -> None:
     _state["tool_progress"] = {
         "name": name,
         "argument_chars": max(0, int(argument_chars or 0)),
         "call_id": call_id,
+        "detail": detail,
     }
     live = _state["live"]
     if live is not None:

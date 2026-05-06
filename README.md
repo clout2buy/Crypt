@@ -80,6 +80,11 @@ token local Ollama accepts. Anthropic OAuth is never used for Ollama.
 Cloud calls are opt-in: set `OLLAMA_HOST=https://ollama.com` and
 `OLLAMA_API_KEY`, then choose a `*-cloud` model.
 
+Crypt also defaults to `auto-edits` approval: file writes, edits, and
+opening generated files run without a second prompt, while shell commands
+and destructive actions still require approval. Use `/safe` or set
+`CRYPT_APPROVAL=normal` if you want prompts for every edit.
+
 Crypt uses the official `anthropic` SDK pointed at Ollama's
 Anthropic-compatible `/v1/messages` endpoint — the same surface Ollama
 documents for the Anthropic SDK. You get eager tool dispatch (tool names
@@ -295,6 +300,7 @@ Crypt auto-loads project guidance from the workspace and parents:
 |---|---|---|
 | `CRYPT_ROOT` | saved or cwd | Workspace root for tools |
 | `CRYPT_PROVIDER` | saved or `ollama` | `anthropic`, `openai`, or `ollama` |
+| `CRYPT_APPROVAL` | `edits` | `normal`, `edits`, or `all` |
 | `CRYPT_NO_ANIMATION` | unset | Disables the startup splash |
 | `CRYPT_WEB_ALLOW_PRIVATE` | unset | Lets `web_fetch` hit RFC1918 |
 | `CRYPT_WEB_ALLOWED_HOSTS` | unset | Comma-separated allowlist |
@@ -307,7 +313,7 @@ Crypt auto-loads project guidance from the workspace and parents:
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama URL (auto-normalized) |
 | `OLLAMA_API_KEY` | `ollama` | Bearer token; only required for cloud/custom auth |
 | `OLLAMA_MAX_TOKENS` | 16384 | Output budget |
-| `OLLAMA_THINKING_BUDGET` | 8000 | Reasoning budget; 0 disables |
+| `OLLAMA_THINKING_BUDGET` | 2048 | Reasoning budget; 0 disables |
 | `OLLAMA_TIMEOUT` | 600 | Request timeout in seconds |
 
 ---

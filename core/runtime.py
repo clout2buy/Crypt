@@ -16,7 +16,7 @@ _provider = None
 _cwd = "."
 _subagent_runner: Callable[[str], str] | None = None
 _session = None
-_approval_mode = "normal"
+_approval_mode = os.getenv("CRYPT_APPROVAL", "edits").strip().lower()
 _show_thinking = False
 _render_tools = contextvars.ContextVar("crypt_render_tools", default=True)
 _git_snapshot_cache: dict[str, str] = {}
@@ -25,6 +25,8 @@ APPROVAL_NORMAL = "normal"
 APPROVAL_EDITS = "edits"
 APPROVAL_ALL = "all"
 APPROVAL_MODES = (APPROVAL_NORMAL, APPROVAL_EDITS, APPROVAL_ALL)
+if _approval_mode not in APPROVAL_MODES:
+    _approval_mode = APPROVAL_EDITS
 AUTO_EDIT_TOOLS = {
     "edit_file",
     "write_file",

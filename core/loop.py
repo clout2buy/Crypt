@@ -1,6 +1,7 @@
 ﻿"""Agent loop: stream, dispatch tools, repeat."""
 from __future__ import annotations
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -474,6 +475,7 @@ def _stream_one_turn(
                         event.name,
                         argument_chars=event.argument_chars,
                         call_id=event.call_id,
+                        detail=_tool_progress_detail(event),
                     )
             elif isinstance(event, TextDelta):
                 if not render:
@@ -608,6 +610,88 @@ def _dispatch_tool_uses(
     messages.append(result_msg)
     if record and runtime.session():
         runtime.session().record_message(result_msg)
+
+
+def _tool_progress_detail(event: ToolUseProgress) -> str:
+    partial = event.partial_json or ""
+    if not partial:
+        return "tool call opened"
+    parsed = _partial_tool_args(partial)
+    if event.name in {"write_file", "edit_file"}:
+        path = str(parsed.get("path") or "")
+        content = str(parsed.get("content") or parsed.get("new") or "")
+        if content:
+            lines = content.count("\n") + 1
+            label = f"{lines} line(s), {len(content):,} chars"
+        else:
+            label = f"{len(partial):,} arg chars"
+        return f"{path} - {label}" if path else label
+    if event.name == "multi_edit":
+        path = str(parsed.get("path") or "")
+        edits = parsed.get("edits")
+        if isinstance(edits, list):
+            label = f"{len(edits)} edit(s)"
+        else:
+            label = f"{len(partial):,} arg chars"
+        return f"{path} - {label}" if path else label
+    if event.name == "bash_start":
+        cmd = str(parsed.get("command") or "")
+        return cmd[:120] if cmd else f"{len(partial):,} arg chars"
+    return f"{len(partial):,} arg chars"
+
+
+def _partial_tool_args(partial: str) -> dict:
+    try:
+        value = json.loads(partial)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    out: dict[str, str] = {}
+    for key in ("path", "command", "content", "new"):
+        value = _partial_json_string_value(partial, key)
+        if value:
+            out[key] = value
+    return out
+
+
+def _partial_json_string_value(text: str, key: str) -> str:
+    marker = f'"{key}"'
+    idx = text.find(marker)
+    if idx < 0:
+        return ""
+    colon = text.find(":", idx + len(marker))
+    if colon < 0:
+        return ""
+    start = text.find('"', colon + 1)
+    if start < 0:
+        return ""
+    chars: list[str] = []
+    escaped = False
+    for ch in text[start + 1:]:
+        if escaped:
+            chars.append(_unescape_json_char(ch))
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            break
+        chars.append(ch)
+    return "".join(chars)
+
+
+def _unescape_json_char(ch: str) -> str:
+    return {
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "b": "\b",
+        "f": "\f",
+    }.get(ch, ch)
 
 
 def _can_dispatch_parallel(tool_blocks: list[dict]) -> bool:

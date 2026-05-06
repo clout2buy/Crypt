@@ -204,7 +204,7 @@ def test_stream_turn_enables_thinking_by_default(monkeypatch):
     sent = fake.messages.calls[0]
     assert "thinking" in sent
     assert sent["thinking"]["type"] == "enabled"
-    assert sent["thinking"]["budget_tokens"] > 0
+    assert sent["thinking"]["budget_tokens"] == 2048
 
 
 def test_stream_turn_omits_thinking_when_budget_is_zero(monkeypatch):
