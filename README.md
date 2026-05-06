@@ -31,10 +31,9 @@ python main.py             # launch the agent
 ```
 
 Setup is optional. A fresh clone launches in the current directory with
-Ollama selected by default; `python main.py setup` only exists when you
-want to save a different provider, model, or workspace. If you use Ollama
-Cloud, set `OLLAMA_API_KEY`. Local Ollama at `http://localhost:11434`
-does not need a key from Crypt.
+local Ollama selected by default; `python main.py setup` only exists when
+you want to save a different provider, model, or workspace. Start Ollama
+with `ollama serve`; no API key or Anthropic login is needed for localhost.
 
 ---
 
@@ -70,13 +69,16 @@ serves Chat Completions.
 ### Ollama (local or cloud)
 
 ```bash
-export OLLAMA_API_KEY=...                            # cloud only
-python main.py --provider ollama --model qwen3-coder:480b-cloud
+ollama serve
+ollama pull gpt-oss:20b                              # or another local model
+python main.py
 ```
 
-Ollama is the zero-config default provider for a fresh checkout. Anthropic
-OAuth is never used for Ollama; cloud calls need `OLLAMA_API_KEY`, while a
-local Ollama daemon normally works without any key.
+Local Ollama is the zero-config default provider for a fresh checkout.
+Crypt connects to `http://localhost:11434` and uses the default bearer
+token local Ollama accepts. Anthropic OAuth is never used for Ollama.
+Cloud calls are opt-in: set `OLLAMA_HOST=https://ollama.com` and
+`OLLAMA_API_KEY`, then choose a `*-cloud` model.
 
 Crypt uses the official `anthropic` SDK pointed at Ollama's
 Anthropic-compatible `/v1/messages` endpoint — the same surface Ollama
@@ -302,8 +304,8 @@ Crypt auto-loads project guidance from the workspace and parents:
 | `ANTHROPIC_THINKING_BUDGET` | 512 | Anthropic thinking budget |
 | `OPENAI_BASE_URL` | api.openai.com | Override for compat servers |
 | `OPENAI_MAX_TOKENS` | 4096 | OpenAI response cap |
-| `OLLAMA_HOST` | `https://ollama.com` | Ollama URL (auto-normalized) |
-| `OLLAMA_API_KEY` | `ollama` | Bearer token; required for cloud |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama URL (auto-normalized) |
+| `OLLAMA_API_KEY` | `ollama` | Bearer token; only required for cloud/custom auth |
 | `OLLAMA_MAX_TOKENS` | 16384 | Output budget |
 | `OLLAMA_THINKING_BUDGET` | 8000 | Reasoning budget; 0 disables |
 | `OLLAMA_TIMEOUT` | 600 | Request timeout in seconds |

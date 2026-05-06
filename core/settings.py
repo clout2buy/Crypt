@@ -56,9 +56,15 @@ OPENAI_MODELS = (
     "o3-mini",
 )
 
-OLLAMA_MODEL = "gpt-oss:120b-cloud"
-OLLAMA_HOST = "https://ollama.com"
+OLLAMA_MODEL = "gpt-oss:20b"
+OLLAMA_HOST = "http://localhost:11434"
 OLLAMA_MODELS = (
+    "gpt-oss:20b",
+    "gpt-oss:120b",
+    "qwen2.5-coder:7b",
+    "qwen2.5-coder:14b",
+    "qwen2.5-coder:32b",
+    "deepseek-coder-v2:16b",
     "gpt-oss:120b-cloud",
     "gpt-oss:20b-cloud",
     "qwen3-coder:480b-cloud",
@@ -141,7 +147,7 @@ def env_int(name: str, default: int) -> int:
 
 
 def provider_default(saved: dict | None = None) -> str:
-    saved = saved or load_config()
+    saved = load_config() if saved is None else saved
     explicit = os.getenv("CRYPT_PROVIDER")
     if explicit in PROVIDERS:
         return explicit
@@ -158,25 +164,40 @@ def provider_default(saved: dict | None = None) -> str:
 
 
 def model_default(provider: str, saved: dict | None = None) -> str:
-    saved = saved or load_config()
+    saved = load_config() if saved is None else saved
     if provider == PROVIDER_ANTHROPIC:
         return os.getenv("ANTHROPIC_MODEL") or saved.get("anthropic_model") or ANTHROPIC_MODEL
     if provider == PROVIDER_OPENAI:
         return os.getenv("OPENAI_MODEL") or saved.get("openai_model") or OPENAI_MODEL
-    return os.getenv("OLLAMA_MODEL") or saved.get("ollama_model") or OLLAMA_MODEL
+    explicit = os.getenv("OLLAMA_MODEL")
+    if explicit:
+        return explicit
+    value = saved.get("ollama_model") or OLLAMA_MODEL
+    host = ollama_host(saved=saved)
+    if is_local_host(host) and is_ollama_cloud_model(str(value)):
+        return OLLAMA_MODEL
+    return value
 
 
 def openai_base_url(saved: dict | None = None) -> str:
     """Returns the configured OpenAI base URL (env > saved > default).
     Lets users point at OpenAI-compatible endpoints (Together, Fireworks,
     LM Studio, vLLM, etc.) without code changes."""
-    saved = saved or load_config()
+    saved = load_config() if saved is None else saved
     return os.getenv("OPENAI_BASE_URL") or saved.get("openai_base_url") or OPENAI_BASE_URL
 
 
 def ollama_host(cli_host: str | None = None, saved: dict | None = None) -> str:
-    saved = saved or load_config()
-    return client_host(cli_host or os.getenv("OLLAMA_HOST") or saved.get("ollama_host") or OLLAMA_HOST)
+    saved = load_config() if saved is None else saved
+    explicit = cli_host or os.getenv("OLLAMA_HOST")
+    if explicit:
+        return client_host(explicit)
+    saved_host = saved.get("ollama_host")
+    if saved_host:
+        host = client_host(str(saved_host))
+        if not (is_ollama_cloud_host(host) and not os.getenv("OLLAMA_API_KEY")):
+            return host
+    return OLLAMA_HOST
 
 
 def is_ollama_cloud_host(host: str) -> bool:
@@ -191,6 +212,10 @@ def is_local_host(host: str) -> bool:
     return hostname in {"localhost", "127.0.0.1", "::1"}
 
 
+def is_ollama_cloud_model(model: str) -> bool:
+    return model.endswith(":cloud") or model.endswith("-cloud")
+
+
 def client_host(host: str) -> str:
     host = host.strip()
     raw = host if "://" in host else f"http://{host}"
@@ -202,7 +227,7 @@ def client_host(host: str) -> str:
 
 
 def resolve_workspace(cli_root: str | None = None, saved: dict | None = None) -> Path:
-    saved = saved or load_config()
+    saved = load_config() if saved is None else saved
     explicit = cli_root or os.getenv("CRYPT_ROOT")
     if explicit:
         return _valid_workspace(Path(explicit))

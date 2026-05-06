@@ -37,6 +37,8 @@ def test_fresh_clone_defaults_to_ollama_without_setup(monkeypatch):
     _clear_provider_env(monkeypatch)
 
     assert settings.provider_default({}) == settings.PROVIDER_OLLAMA
+    assert settings.ollama_host(saved={}) == "http://localhost:11434"
+    assert settings.model_default(settings.PROVIDER_OLLAMA, {}) == "gpt-oss:20b"
     assert main._needs_setup({}, _args()) is False
 
 
@@ -73,8 +75,8 @@ def test_ollama_auth_label_distinguishes_cloud_and_local(monkeypatch):
 
     cloud = main._provider_auth_label(
         settings.PROVIDER_OLLAMA,
-        _args(),
-        {"ollama_host": "https://ollama.com"},
+        _args(ollama_host="https://ollama.com"),
+        {},
         None,
     )
     local = main._provider_auth_label(
@@ -88,8 +90,34 @@ def test_ollama_auth_label_distinguishes_cloud_and_local(monkeypatch):
     assert local == "local Ollama"
 
 
-def test_doctor_reports_missing_ollama_cloud_key(monkeypatch):
+def test_saved_cloud_ollama_without_key_falls_back_to_local(monkeypatch):
     _clear_provider_env(monkeypatch)
+    saved = {
+        "provider": settings.PROVIDER_OLLAMA,
+        "ollama_host": "https://ollama.com",
+        "ollama_model": "glm-5.1:cloud",
+    }
+
+    assert settings.ollama_host(saved=saved) == "http://localhost:11434"
+    assert settings.model_default(settings.PROVIDER_OLLAMA, saved) == "gpt-oss:20b"
+
+
+def test_saved_cloud_ollama_with_key_stays_cloud(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OLLAMA_API_KEY", "key")
+    saved = {
+        "provider": settings.PROVIDER_OLLAMA,
+        "ollama_host": "https://ollama.com",
+        "ollama_model": "glm-5.1:cloud",
+    }
+
+    assert settings.ollama_host(saved=saved) == "https://ollama.com"
+    assert settings.model_default(settings.PROVIDER_OLLAMA, saved) == "glm-5.1:cloud"
+
+
+def test_doctor_reports_missing_ollama_cloud_key(monkeypatch, tmp_path):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setenv("CRYPT_PROVIDER", settings.PROVIDER_OLLAMA)
     monkeypatch.setenv("OLLAMA_HOST", "https://ollama.com")
 
@@ -98,3 +126,15 @@ def test_doctor_reports_missing_ollama_cloud_key(monkeypatch):
     assert check.ok is False
     assert "OLLAMA_API_KEY" in check.detail
     assert "Anthropic login is not used for Ollama" in check.detail
+
+
+def test_doctor_accepts_default_local_ollama_without_key(monkeypatch, tmp_path):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setenv("CRYPT_PROVIDER", settings.PROVIDER_OLLAMA)
+
+    check = _check_provider_auth()
+
+    assert check.ok is True
+    assert "local Ollama" in check.detail
+    assert "no key required" in check.detail
