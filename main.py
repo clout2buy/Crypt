@@ -98,7 +98,7 @@ def main() -> int:
         _save_runtime_choice(args, saved, provider_name, provider.model, cwd)
         session_obj = _session_for_startup(args, cwd, provider)
         ui.clear_screen()
-        _welcome(provider, cred, str(cwd))
+        _welcome(provider, cred, str(cwd), args, saved)
 
         def switch_model(active_provider):
             nonlocal saved, provider_name, model_override, cred, provider
@@ -110,14 +110,19 @@ def main() -> int:
                 [
                     (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
                     (settings.PROVIDER_OPENAI, "OpenAI (or compatible)"),
-                    (settings.PROVIDER_OLLAMA, "Ollama Cloud"),
+                    (settings.PROVIDER_OLLAMA, "Ollama (local/cloud)"),
                 ],
                 getattr(active_provider, "name", provider_name),
             )
             model_override = _pick_model(provider_name, saved)
 
-            if provider_name == settings.PROVIDER_OLLAMA and not os.getenv("OLLAMA_API_KEY"):
-                ui.info("OLLAMA_API_KEY is not set; Ollama Cloud calls may fail until it is configured")
+            host = settings.ollama_host(args.ollama_host, saved)
+            if (
+                provider_name == settings.PROVIDER_OLLAMA
+                and settings.is_ollama_cloud_host(host)
+                and not os.getenv("OLLAMA_API_KEY")
+            ):
+                ui.info("Ollama Cloud needs OLLAMA_API_KEY; Anthropic login is not used for Ollama")
 
             cred = _credential(provider_name)
             if provider_name == settings.PROVIDER_ANTHROPIC and not cred:
@@ -130,7 +135,7 @@ def main() -> int:
             ui.status_panel({
                 "provider": provider.name,
                 "model": provider.model,
-                "auth": cred.kind if cred else "none",
+                "auth": _provider_auth_label(provider_name, args, saved, cred),
                 "approval": runtime.approval_label(),
             })
             return provider
@@ -156,7 +161,7 @@ def main() -> int:
             cred = _credential(provider_name)
             provider = _provider(args, settings.load_config(), provider_name, cred, model_override)
             ui.clear_screen()
-            _welcome(provider, cred, str(cwd))
+            _welcome(provider, cred, str(cwd), args, settings.load_config())
 
     except KeyboardInterrupt:
         print()
@@ -170,6 +175,8 @@ def main() -> int:
 
 def _needs_setup(saved: dict, args: argparse.Namespace) -> bool:
     if args.provider or args.model or args.cwd or os.getenv("CRYPT_PROVIDER"):
+        return False
+    if not _env_truthy("CRYPT_REQUIRE_SETUP"):
         return False
     return not saved.get("provider") or not saved.get("workspace")
 
@@ -201,9 +208,9 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
         [
             ("anthropic", "Anthropic OAuth"),
             ("openai", "OpenAI (or compatible)"),
-            ("ollama", "Ollama Cloud"),
+            ("ollama", "Ollama (local/cloud)"),
         ],
-        saved.get("provider") or settings.PROVIDER_ANTHROPIC,
+        settings.provider_default(saved),
     )
 
     if provider == settings.PROVIDER_ANTHROPIC:
@@ -231,8 +238,8 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
             "ollama_model": model,
             "ollama_host": host,
         }
-        if not os.getenv("OLLAMA_API_KEY"):
-            ui.info("OLLAMA_API_KEY is not set; set it before using Ollama Cloud")
+        if settings.is_ollama_cloud_host(host) and not os.getenv("OLLAMA_API_KEY"):
+            ui.info("Ollama Cloud needs OLLAMA_API_KEY; Anthropic login is not used for Ollama")
 
     new_saved = settings.update_config(**values)
     os.environ["CRYPT_ROOT"] = str(workspace)
@@ -246,7 +253,8 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
 def _startup_choice(saved: dict, args: argparse.Namespace, skip: bool = False) -> tuple[str, str | None]:
     provider_name = args.provider or settings.provider_default(saved)
     model_override = args.model
-    if skip or args.no_picker or args.provider or args.model or not sys.stdin.isatty():
+    first_run_no_config = not saved.get("provider") and not _env_truthy("CRYPT_PICKER")
+    if skip or args.no_picker or args.provider or args.model or not sys.stdin.isatty() or first_run_no_config:
         return provider_name, model_override
 
     ui.info("choose provider and model")
@@ -255,7 +263,7 @@ def _startup_choice(saved: dict, args: argparse.Namespace, skip: bool = False) -
         [
             (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
             (settings.PROVIDER_OPENAI, "OpenAI (or compatible)"),
-            (settings.PROVIDER_OLLAMA, "Ollama Cloud"),
+            (settings.PROVIDER_OLLAMA, "Ollama (local/cloud)"),
         ],
         provider_name,
     )
@@ -315,6 +323,29 @@ def _pick_model(provider: str, saved: dict) -> str:
 
 def _credential(provider_name: str) -> auth.Credential | None:
     return auth.resolve() if provider_name == settings.PROVIDER_ANTHROPIC else None
+
+
+def _env_truthy(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _provider_auth_label(
+    provider_name: str,
+    args: argparse.Namespace | None,
+    saved: dict | None,
+    cred: auth.Credential | None,
+) -> str:
+    if provider_name == settings.PROVIDER_ANTHROPIC:
+        return cred.kind if cred else "missing Anthropic auth"
+    if provider_name == settings.PROVIDER_OPENAI:
+        return "OPENAI_API_KEY" if os.getenv("OPENAI_API_KEY") else "missing OPENAI_API_KEY"
+
+    host = settings.ollama_host(getattr(args, "ollama_host", None), saved or {})
+    if settings.is_ollama_cloud_host(host):
+        return "OLLAMA_API_KEY" if os.getenv("OLLAMA_API_KEY") else "missing OLLAMA_API_KEY"
+    if settings.is_local_host(host):
+        return "local Ollama"
+    return "OLLAMA_API_KEY" if os.getenv("OLLAMA_API_KEY") else "default bearer token"
 
 
 def _provider(
@@ -423,13 +454,20 @@ def _save_runtime_choice(
     settings.update_config(**values)
 
 
-def _welcome(provider, cred: auth.Credential | None, cwd: str) -> None:
+def _welcome(
+    provider,
+    cred: auth.Credential | None,
+    cwd: str,
+    args: argparse.Namespace | None = None,
+    saved: dict | None = None,
+) -> None:
+    provider_name = getattr(provider, "name", "")
     ui.welcome(
         provider=provider.name,
         model=provider.model,
-        auth_kind=cred.kind if cred else None,
-        auth_email=cred.email if cred else None,
-        auth_plan=cred.plan if cred else None,
+        auth_kind=_provider_auth_label(provider_name, args, saved, cred),
+        auth_email=cred.email if provider_name == settings.PROVIDER_ANTHROPIC and cred else None,
+        auth_plan=cred.plan if provider_name == settings.PROVIDER_ANTHROPIC and cred else None,
         cwd=cwd,
     )
 

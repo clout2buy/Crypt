@@ -75,6 +75,19 @@ class _FakeClient:
         self.messages = _FakeMessages(events)
 
 
+class _AuthFailMessages:
+    def create(self, **kwargs):
+        raise AuthenticationError("401 Unauthorized")
+
+
+class _AuthFailClient:
+    messages = _AuthFailMessages()
+
+
+class AuthenticationError(Exception):
+    pass
+
+
 def _make_provider(events, monkeypatch):
     provider = OllamaProvider(model="qwen3-coder:480b-cloud", host="http://localhost:11434")
     fake = _FakeClient(events)
@@ -217,3 +230,16 @@ def test_provider_uses_anthropic_sdk_client():
     # The SDK's Anthropic client exposes the base URL on its underlying
     # http client. We just verify the provider was wired with our URL.
     assert str(provider._client.base_url).rstrip("/") == "https://ollama.com"
+
+
+def test_cloud_auth_error_explains_ollama_key(monkeypatch):
+    provider = OllamaProvider(model="m", host="https://ollama.com")
+    monkeypatch.setattr(provider, "_client", _AuthFailClient())
+
+    with pytest.raises(RuntimeError) as exc:
+        list(provider.stream_turn(messages=[], tools=[], system=""))
+
+    message = str(exc.value)
+    assert "Ollama authentication failed" in message
+    assert "OLLAMA_API_KEY" in message
+    assert "Anthropic OAuth" in message

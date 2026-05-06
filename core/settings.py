@@ -63,11 +63,13 @@ OLLAMA_MODELS = (
     "gpt-oss:20b-cloud",
     "qwen3-coder:480b-cloud",
     "qwen3-coder:30b-cloud",
+    "deepseek-v4-pro:cloud",
     "kimi-k2:latest",
     "kimi-k2:cloud",
     "kimi-k2.6:cloud",
     "deepseek-v3.1:cloud",
     "glm-4.6:cloud",
+    "glm-5.1:cloud",
     "llama3.3:70b-cloud",
 )
 
@@ -140,8 +142,19 @@ def env_int(name: str, default: int) -> int:
 
 def provider_default(saved: dict | None = None) -> str:
     saved = saved or load_config()
-    value = os.getenv("CRYPT_PROVIDER") or saved.get("provider") or PROVIDER_ANTHROPIC
-    return value if value in PROVIDERS else PROVIDER_ANTHROPIC
+    explicit = os.getenv("CRYPT_PROVIDER")
+    if explicit in PROVIDERS:
+        return explicit
+    saved_provider = saved.get("provider")
+    if saved_provider in PROVIDERS:
+        return saved_provider
+    if os.getenv("OLLAMA_API_KEY") or os.getenv("OLLAMA_HOST"):
+        return PROVIDER_OLLAMA
+    if os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL"):
+        return PROVIDER_OPENAI
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return PROVIDER_ANTHROPIC
+    return PROVIDER_OLLAMA
 
 
 def model_default(provider: str, saved: dict | None = None) -> str:
@@ -164,6 +177,18 @@ def openai_base_url(saved: dict | None = None) -> str:
 def ollama_host(cli_host: str | None = None, saved: dict | None = None) -> str:
     saved = saved or load_config()
     return client_host(cli_host or os.getenv("OLLAMA_HOST") or saved.get("ollama_host") or OLLAMA_HOST)
+
+
+def is_ollama_cloud_host(host: str) -> bool:
+    parts = urlsplit(client_host(host))
+    hostname = (parts.hostname or "").lower()
+    return hostname == "ollama.com" or hostname.endswith(".ollama.com")
+
+
+def is_local_host(host: str) -> bool:
+    parts = urlsplit(client_host(host))
+    hostname = (parts.hostname or "").lower()
+    return hostname in {"localhost", "127.0.0.1", "::1"}
 
 
 def client_host(host: str) -> str:

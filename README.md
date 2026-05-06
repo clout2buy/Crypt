@@ -23,21 +23,24 @@ spinners.
 
 ```bash
 pip install -r requirements.txt
-python main.py setup       # interactive: pick provider, model, workspace
-python main.py doctor      # 11 self-checks; verifies your environment
+python main.py setup       # optional: save provider, model, workspace
+python main.py doctor      # 12 self-checks; verifies your environment
 python main.py bench --bench-list
 python main.py eval-target --cwd D:\your-project --eval-check "pytest -q"
 python main.py             # launch the agent
 ```
 
-That's it. Crypt remembers your choices in `~/.crypt/config.json`, so the
-second launch goes straight to the prompt.
+Setup is optional. A fresh clone launches in the current directory with
+Ollama selected by default; `python main.py setup` only exists when you
+want to save a different provider, model, or workspace. If you use Ollama
+Cloud, set `OLLAMA_API_KEY`. Local Ollama at `http://localhost:11434`
+does not need a key from Crypt.
 
 ---
 
 ## Providers
 
-Crypt has three first-class transports. All four use the same internal
+Crypt has three first-class transports. All three use the same internal
 message format (Anthropic-style content blocks), so switching providers
 mid-session via `/model` is a one-keystroke operation.
 
@@ -70,6 +73,10 @@ serves Chat Completions.
 export OLLAMA_API_KEY=...                            # cloud only
 python main.py --provider ollama --model qwen3-coder:480b-cloud
 ```
+
+Ollama is the zero-config default provider for a fresh checkout. Anthropic
+OAuth is never used for Ollama; cloud calls need `OLLAMA_API_KEY`, while a
+local Ollama daemon normally works without any key.
 
 Crypt uses the official `anthropic` SDK pointed at Ollama's
 Anthropic-compatible `/v1/messages` endpoint — the same surface Ollama
@@ -285,7 +292,7 @@ Crypt auto-loads project guidance from the workspace and parents:
 | Env var | Default | Effect |
 |---|---|---|
 | `CRYPT_ROOT` | saved or cwd | Workspace root for tools |
-| `CRYPT_PROVIDER` | saved | `anthropic`, `openai`, or `ollama` |
+| `CRYPT_PROVIDER` | saved or `ollama` | `anthropic`, `openai`, or `ollama` |
 | `CRYPT_NO_ANIMATION` | unset | Disables the startup splash |
 | `CRYPT_WEB_ALLOW_PRIVATE` | unset | Lets `web_fetch` hit RFC1918 |
 | `CRYPT_WEB_ALLOWED_HOSTS` | unset | Comma-separated allowlist |
@@ -295,7 +302,7 @@ Crypt auto-loads project guidance from the workspace and parents:
 | `ANTHROPIC_THINKING_BUDGET` | 512 | Anthropic thinking budget |
 | `OPENAI_BASE_URL` | api.openai.com | Override for compat servers |
 | `OPENAI_MAX_TOKENS` | 4096 | OpenAI response cap |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama URL (auto-normalized) |
+| `OLLAMA_HOST` | `https://ollama.com` | Ollama URL (auto-normalized) |
 | `OLLAMA_API_KEY` | `ollama` | Bearer token; required for cloud |
 | `OLLAMA_MAX_TOKENS` | 16384 | Output budget |
 | `OLLAMA_THINKING_BUDGET` | 8000 | Reasoning budget; 0 disables |

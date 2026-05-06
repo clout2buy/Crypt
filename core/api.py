@@ -788,19 +788,24 @@ class OllamaProvider:
         usage: dict = {"input_tokens": 0, "output_tokens": 0}
         stop_reason = "end_turn"
 
-        stream = self._client.messages.create(**kwargs)
-        for event in stream:
-            event_type = getattr(event, "type", None)
-            if not event_type:
-                continue
-            # SDK events are Pydantic models; convert to dicts so the
-            # shared event processor can read them like raw SSE payloads.
-            data = event.model_dump() if hasattr(event, "model_dump") else dict(event)
-            for ev in _process_event(event_type, data, content_blocks, usage):
-                if isinstance(ev, _StopReason):
-                    stop_reason = ev.value
-                else:
-                    yield ev
+        try:
+            stream = self._client.messages.create(**kwargs)
+            for event in stream:
+                event_type = getattr(event, "type", None)
+                if not event_type:
+                    continue
+                # SDK events are Pydantic models; convert to dicts so the
+                # shared event processor can read them like raw SSE payloads.
+                data = event.model_dump() if hasattr(event, "model_dump") else dict(event)
+                for ev in _process_event(event_type, data, content_blocks, usage):
+                    if isinstance(ev, _StopReason):
+                        stop_reason = ev.value
+                    else:
+                        yield ev
+        except Exception as e:
+            if _is_ollama_auth_error(e):
+                raise RuntimeError(_ollama_auth_help(self._base_url)) from e
+            raise
 
         yield TurnEnd(
             stop_reason=stop_reason,
@@ -830,6 +835,42 @@ def _normalize_ollama_host(host: str) -> str:
     if parsed.port is None and parsed.hostname in ("localhost", "127.0.0.1", "::1"):
         host = f"{parsed.scheme}://{parsed.hostname}:11434{parsed.path or ''}"
     return host
+
+
+def _is_ollama_auth_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if name in {"authenticationerror", "permissiondeniederror"}:
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "401",
+            "403",
+            "unauthorized",
+            "forbidden",
+            "invalid api key",
+            "authentication",
+            "permission denied",
+        )
+    )
+
+
+def _ollama_auth_help(base_url: str) -> str:
+    from .settings import is_ollama_cloud_host
+
+    if is_ollama_cloud_host(base_url):
+        return (
+            "Ollama authentication failed for https://ollama.com. "
+            "Ollama does not use Anthropic OAuth; set OLLAMA_API_KEY to an "
+            "Ollama Cloud API key, or use --ollama-host http://localhost:11434 "
+            "for local Ollama."
+        )
+    return (
+        "Ollama authentication failed. Ollama does not use Anthropic OAuth. "
+        "Set OLLAMA_API_KEY only if this Ollama host requires a bearer token; "
+        "local Ollama normally uses http://localhost:11434 without a key."
+    )
 
 
 def _to_openai_tool(tool: dict) -> dict:

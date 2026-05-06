@@ -35,6 +35,7 @@ def run_doctor(cwd: str | Path) -> str:
         _check_identity_strings(cwd),
         _check_ripgrep(),
         _check_app_dir_writable(),
+        _check_provider_auth(),
         _check_known_model(),
     ]
     passed = sum(1 for c in checks if c.ok)
@@ -239,6 +240,53 @@ def _check_app_dir_writable() -> Check:
         return Check("app dir writable", True, str(APP_DIR))
     except OSError as e:
         return Check("app dir writable", False, f"{APP_DIR}: {e}")
+
+
+def _check_provider_auth() -> Check:
+    from . import auth
+    from .settings import (
+        PROVIDER_ANTHROPIC,
+        PROVIDER_OLLAMA,
+        PROVIDER_OPENAI,
+        is_local_host,
+        is_ollama_cloud_host,
+        load_config,
+        ollama_host,
+        provider_default,
+    )
+
+    try:
+        saved = load_config()
+        provider = provider_default(saved)
+        if provider == PROVIDER_ANTHROPIC:
+            stored = auth.load() or {}
+            if os.getenv("ANTHROPIC_API_KEY") or stored.get("access"):
+                return Check("provider auth", True, "Anthropic credentials available")
+            return Check("provider auth", False, "Anthropic selected; run login or set ANTHROPIC_API_KEY")
+
+        if provider == PROVIDER_OPENAI:
+            if os.getenv("OPENAI_API_KEY"):
+                return Check("provider auth", True, "OPENAI_API_KEY is set")
+            return Check("provider auth", False, "OpenAI selected; set OPENAI_API_KEY")
+
+        if provider == PROVIDER_OLLAMA:
+            host = ollama_host(saved=saved)
+            if is_ollama_cloud_host(host):
+                if os.getenv("OLLAMA_API_KEY"):
+                    return Check("provider auth", True, f"Ollama Cloud key available for {host}")
+                return Check(
+                    "provider auth",
+                    False,
+                    "Ollama Cloud selected; set OLLAMA_API_KEY. Anthropic login is not used for Ollama.",
+                )
+            if is_local_host(host):
+                return Check("provider auth", True, f"local Ollama host {host}; no key required by Crypt")
+            detail = f"custom Ollama host {host}; using OLLAMA_API_KEY if set, otherwise default bearer token"
+            return Check("provider auth", True, detail)
+
+        return Check("provider auth", False, f"unknown provider {provider!r}")
+    except Exception as e:
+        return Check("provider auth", False, f"{type(e).__name__}: {e}")
 
 
 def _check_known_model() -> Check:
