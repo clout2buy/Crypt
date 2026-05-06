@@ -72,6 +72,31 @@ def test_unread_file_blocks_atomically(workspace: Path):
     assert b.read_text() == "beta\n"
 
 
+def test_write_failure_rolls_back_prior_files(workspace: Path, monkeypatch: pytest.MonkeyPatch):
+    a = workspace / "a.txt"
+    b = workspace / "b.txt"
+    a.write_text("alpha\n")
+    b.write_text("beta\n")
+    setup_read(a)
+    setup_read(b)
+    real_atomic_write = multi_edit._atomic_write
+
+    def flaky_atomic_write(path: Path, data: bytes) -> None:
+        if path == b:
+            raise OSError("simulated disk failure")
+        real_atomic_write(path, data)
+
+    monkeypatch.setattr(multi_edit, "_atomic_write", flaky_atomic_write)
+    with pytest.raises(RuntimeError, match="rolled back"):
+        multi_edit.run({"changes": [
+            {"path": str(a), "old": "alpha", "new": "ALPHA"},
+            {"path": str(b), "old": "beta", "new": "BETA"},
+        ]})
+
+    assert a.read_text() == "alpha\n"
+    assert b.read_text() == "beta\n"
+
+
 def test_preview_returns_combined_diff(workspace: Path):
     a = workspace / "a.txt"
     a.write_text("hi\n")

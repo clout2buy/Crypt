@@ -1,8 +1,6 @@
 """Registry dispatch — permission integration, classify hooks, missing args."""
 from __future__ import annotations
 
-import pytest
-
 from tools import registry
 from tools.types import Tool
 
@@ -55,6 +53,14 @@ def test_schema_validation_rejects_wrong_type(monkeypatch):
     assert ok is False
     assert "schema validation failed" in msg
     assert "x: expected string" in msg
+
+
+def test_required_string_may_be_empty(monkeypatch):
+    tool = _stub_tool(permission="auto")
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+    ok, msg = registry.dispatch(tool.name, {"x": ""}, render=False)
+    assert ok is True
+    assert "ran" in msg
 
 
 def test_schema_validation_checks_nested_enum(monkeypatch):

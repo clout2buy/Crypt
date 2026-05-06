@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from core import loop, runtime
-from core.api import TextDelta, ToolUseProgress, ToolUseReady, TurnEnd, _process_event
+from core.api import TextDelta, ToolUseProgress, TurnEnd, _finalized_assistant_message, _process_event
 from tools import registry
 from tools.types import Tool
 
@@ -13,7 +13,8 @@ class _FakeProvider:
 
     def stream_turn(self, messages, tools, system):
         yield TextDelta("I'll do that.")
-        yield ToolUseReady(
+        yield TurnEnd(
+            stop_reason="tool_use",
             message={
                 "role": "assistant",
                 "content": [
@@ -25,9 +26,8 @@ class _FakeProvider:
                         "input": {"path": "README.md"},
                     },
                 ],
-            }
+            },
         )
-        raise AssertionError("stream should be cut once a tool call is ready")
 
 
 def test_stream_one_turn_cuts_over_to_ready_tool(workspace):
@@ -47,7 +47,7 @@ def test_stream_one_turn_cuts_over_to_ready_tool(workspace):
     assert end.message["content"][1]["input"] == {"path": "README.md"}
 
 
-def test_anthropic_block_stop_emits_ready_tool():
+def test_anthropic_block_stop_does_not_dispatch_before_full_message():
     content_blocks = []
     usage = {"input_tokens": 10, "output_tokens": 3}
 
@@ -84,11 +84,8 @@ def test_anthropic_block_stop_emits_ready_tool():
         usage,
     ))
 
-    assert len(events) == 1
-    ready = events[0]
-    assert isinstance(ready, ToolUseReady)
-    assert ready.usage == usage
-    assert ready.message["content"] == [
+    assert events == []
+    assert _finalized_assistant_message(content_blocks)["content"] == [
         {
             "type": "tool_use",
             "id": "toolu_1",
@@ -96,6 +93,96 @@ def test_anthropic_block_stop_emits_ready_tool():
             "input": {"path": "README.md"},
         }
     ]
+
+
+def test_anthropic_multiple_tool_blocks_survive_until_final_message():
+    content_blocks = []
+    usage = {"input_tokens": 10, "output_tokens": 3}
+
+    for idx, tool_id, path in [
+        (0, "toolu_1", "a.py"),
+        (1, "toolu_2", "b.py"),
+    ]:
+        list(_process_event(
+            "content_block_start",
+            {
+                "index": idx,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": tool_id,
+                    "name": "read_file",
+                },
+            },
+            content_blocks,
+            usage,
+        ))
+        list(_process_event(
+            "content_block_delta",
+            {
+                "index": idx,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": f'{{"path":"{path}"}}',
+                },
+            },
+            content_blocks,
+            usage,
+        ))
+        events = list(_process_event(
+            "content_block_stop",
+            {"index": idx},
+            content_blocks,
+            usage,
+        ))
+        assert events == []
+
+    msg = _finalized_assistant_message(content_blocks)
+    assert [b["id"] for b in msg["content"]] == ["toolu_1", "toolu_2"]
+    assert [b["input"]["path"] for b in msg["content"]] == ["a.py", "b.py"]
+
+
+def test_multi_tool_assistant_message_uses_parallel_dispatch(monkeypatch):
+    class Provider:
+        is_oauth = False
+
+    calls: list[list[str]] = []
+
+    def fake_parallel(blocks, *, render):
+        calls.append([block["id"] for block in blocks])
+        return [
+            {
+                "type": "tool_result",
+                "tool_use_id": block["id"],
+                "content": "ok",
+                "is_error": False,
+            }
+            for block in blocks
+        ]
+
+    tool = Tool(
+        name="parallel_stub",
+        description="stub",
+        schema={"type": "object", "properties": {}, "required": []},
+        permission="auto",
+        run=lambda args: "ok",
+        parallel_safe=True,
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+    monkeypatch.setattr(loop, "_dispatch_parallel", fake_parallel)
+
+    assistant_msg = {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "call_1", "name": "parallel_stub", "input": {}},
+            {"type": "tool_use", "id": "call_2", "name": "parallel_stub", "input": {}},
+        ],
+    }
+    messages = [assistant_msg]
+
+    loop._dispatch_tool_uses(Provider(), assistant_msg, messages, record=False, render=False)
+
+    assert calls == [["call_1", "call_2"]]
+    assert [b["tool_use_id"] for b in messages[-1]["content"]] == ["call_1", "call_2"]
 
 
 def test_anthropic_json_delta_emits_tool_progress():
@@ -151,7 +238,8 @@ class _TextThenToolProvider:
             yield TextDelta("```html\n")
             raise AssertionError("artifact text stream should be cut immediately")
         if self.calls == 2:
-            yield ToolUseReady(
+            yield TurnEnd(
+                stop_reason="tool_use",
                 message={
                     "role": "assistant",
                     "content": [
@@ -162,7 +250,7 @@ class _TextThenToolProvider:
                             "input": {"x": "ok"},
                         }
                     ],
-                }
+                },
             )
             return
         yield TextDelta("done")
@@ -185,7 +273,8 @@ class _TextThenToolNoRenderProvider(_TextThenToolProvider):
             )
             return
         if self.calls == 2:
-            yield ToolUseReady(
+            yield TurnEnd(
+                stop_reason="tool_use",
                 message={
                     "role": "assistant",
                     "content": [
@@ -196,7 +285,7 @@ class _TextThenToolNoRenderProvider(_TextThenToolProvider):
                             "input": {"x": "ok"},
                         }
                     ],
-                }
+                },
             )
             return
         yield TextDelta("done")
@@ -277,7 +366,8 @@ class _PlanThenToolProvider:
     def stream_turn(self, messages, tools, system):
         self.calls += 1
         if self.calls == 1:
-            yield ToolUseReady(
+            yield TurnEnd(
+                stop_reason="tool_use",
                 message={
                     "role": "assistant",
                     "content": [{
@@ -286,11 +376,12 @@ class _PlanThenToolProvider:
                         "name": "present_plan",
                         "input": {"title": "Demo", "plan": "Create one HTML file."},
                     }],
-                }
+                },
             )
             return
         if self.calls == 2:
-            yield ToolUseReady(
+            yield TurnEnd(
+                stop_reason="tool_use",
                 message={
                     "role": "assistant",
                     "content": [{
@@ -299,7 +390,7 @@ class _PlanThenToolProvider:
                         "name": "stub",
                         "input": {"x": "ok"},
                     }],
-                }
+                },
             )
             return
         yield TurnEnd(
@@ -351,7 +442,7 @@ def test_artifact_request_shows_real_stream_activity(monkeypatch, workspace):
 
     assert "waiting for provider response" in seen
     assert "receiving text stream" in seen
-    assert "tool call ready" in seen
+    assert "response complete" in seen
 
 
 def test_real_stream_activity_survives_after_plan_approval(monkeypatch, workspace):
@@ -391,4 +482,4 @@ def test_real_stream_activity_survives_after_plan_approval(monkeypatch, workspac
 
     assert "waiting for provider response" in seen
     assert "receiving text stream" in seen
-    assert "tool call ready" in seen
+    assert "response complete" in seen

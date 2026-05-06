@@ -203,10 +203,23 @@ def _check_tool_load_failures() -> Check:
 
 def _check_ripgrep() -> Check:
     import shutil
+    import subprocess
 
     rg = shutil.which("rg")
     if rg:
-        return Check("ripgrep (rg)", True, rg)
+        try:
+            r = subprocess.run([rg, "--version"], capture_output=True, text=True, timeout=5)
+        except Exception as e:
+            return Check(
+                "ripgrep (rg)",
+                True,
+                f"{rg} found but not executable ({type(e).__name__}); grep falls back to Python",
+            )
+        if r.returncode == 0:
+            version = (r.stdout or "").splitlines()[0] if r.stdout else rg
+            return Check("ripgrep (rg)", True, version)
+        detail = (r.stderr or r.stdout or "").strip()[:160] or f"exit {r.returncode}"
+        return Check("ripgrep (rg)", True, f"{rg} failed ({detail}); grep falls back to Python")
     # Soft warning — Python fallback exists. Surface as a non-blocking note.
     return Check(
         "ripgrep (rg)",
@@ -235,6 +248,7 @@ def _check_known_model() -> Check:
     from .settings import (
         ANTHROPIC_MODELS,
         OLLAMA_MODELS,
+        OPENAI_MODELS,
         load_config,
         provider_default,
         model_default,
@@ -243,7 +257,12 @@ def _check_known_model() -> Check:
     saved = load_config()
     provider = provider_default(saved)
     model = model_default(provider, saved)
-    known = ANTHROPIC_MODELS if provider == "anthropic" else OLLAMA_MODELS
+    if provider == "anthropic":
+        known = ANTHROPIC_MODELS
+    elif provider == "openai":
+        known = OPENAI_MODELS
+    else:
+        known = OLLAMA_MODELS
     if model in known:
         return Check("model is known", True, f"{provider}:{model}")
     return Check(

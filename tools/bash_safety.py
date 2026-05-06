@@ -31,15 +31,10 @@ _SAFE_LEAD: frozenset[str] = frozenset({
     "get-childitem", "get-content", "get-location", "get-process",
 })
 
-# git subcommands that never mutate the repo
-_SAFE_GIT_SUB: frozenset[str] = frozenset({
+# git subcommands that never mutate the repo regardless of ordinary args.
+_SAFE_GIT_ALWAYS: frozenset[str] = frozenset({
     "status", "diff", "log", "show", "blame",
-    "branch",       # bare or with -a/-v just lists
-    "remote",       # bare or with -v just lists
-    "config",       # `git config --get foo` — not great but rarely harmful
     "rev-parse", "ls-files", "ls-tree", "describe",
-    "tag",          # `git tag` lists; `git tag X` creates but is reversible
-    "stash",        # `git stash list` etc.
 })
 
 # Regexes for clearly destructive operations. Each entry is (pattern, reason).
@@ -124,9 +119,31 @@ def is_read_only(command: str) -> bool:
     if not lead:
         return False
     if lead == "git":
-        sub = parts[1].lower() if len(parts) > 1 else ""
-        return sub in _SAFE_GIT_SUB
+        return _is_read_only_git(parts[1:])
     return lead in _SAFE_LEAD
+
+
+def _is_read_only_git(args: list[str]) -> bool:
+    if not args:
+        return False
+    sub = args[0].lower()
+    rest = [a.lower() for a in args[1:]]
+    if sub in _SAFE_GIT_ALWAYS:
+        return True
+    if sub == "branch":
+        return not rest or all(
+            a in {"-a", "-r", "-v", "-vv", "--all", "--remotes", "--list"}
+            for a in rest
+        )
+    if sub == "remote":
+        return not rest or rest == ["-v"] or (rest and rest[0] in {"show", "get-url"})
+    if sub == "config":
+        return bool(rest) and rest[0] in {"--get", "--get-all", "--get-regexp", "--list", "-l"}
+    if sub == "tag":
+        return not rest or rest[0] in {"-l", "--list", "-n"}
+    if sub == "stash":
+        return bool(rest) and rest[0] in {"list", "show"}
+    return False
 
 
 def classify(command: str) -> str | None:

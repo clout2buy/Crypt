@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -140,11 +139,7 @@ class Session:
         tmp = _json_line(entry)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(tmp)
-        if os.name != "nt":
-            try:
-                os.chmod(self.path, 0o600)
-            except OSError:
-                pass
+        settings.restrict_file_permissions(self.path)
 
     def record_message(self, message: dict[str, Any]) -> None:
         self.append({"type": "message", "message": message})

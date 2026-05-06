@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .settings import AUTH_PATH
+from .settings import AUTH_PATH, restrict_file_permissions
 
 
 @dataclass
@@ -38,8 +38,7 @@ def save(data: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     tmp.replace(path)
-    if os.name != "nt":
-        os.chmod(path, 0o600)
+    restrict_file_permissions(path)
 
 
 def delete() -> None:

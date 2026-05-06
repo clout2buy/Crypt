@@ -8,6 +8,8 @@ import time
 import uuid
 from pathlib import Path
 
+from core.settings import restrict_file_permissions
+
 from .bash_safety import classify as _classify_command, is_destructive
 from .fs import int_arg, root
 from .types import Tool
@@ -192,11 +194,7 @@ def _write_spill(command: str, stdout: str, stderr: str) -> str:
                 f.write(stderr)
                 if not stderr.endswith("\n"):
                     f.write("\n")
-        if os.name != "nt":
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
+        restrict_file_permissions(path)
         return str(path)
     except OSError:
         return ""

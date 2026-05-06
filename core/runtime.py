@@ -42,8 +42,7 @@ def configure(
     _provider = provider
     _cwd = cwd
     _subagent_runner = subagent_runner
-    if session is not None:
-        _session = session
+    _session = session
     os.environ["CRYPT_ROOT"] = str(cwd)
 
 

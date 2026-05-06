@@ -27,7 +27,7 @@ def main() -> int:
     saved = settings.load_config()
 
     p = argparse.ArgumentParser(prog="crypt", description="local-first coding harness")
-    p.add_argument("--provider", choices=settings.PROVIDERS, help="anthropic oauth or ollama cloud")
+    p.add_argument("--provider", choices=settings.PROVIDERS, help="anthropic oauth, openai-compatible, or ollama")
     p.add_argument("--model", help="model id; overrides saved/default model")
     p.add_argument("--cwd", help="workspace root for tools")
     p.add_argument("--max-tokens", type=int, help="Anthropic response token cap")
@@ -43,7 +43,28 @@ def main() -> int:
     p.add_argument("--no-picker", action="store_true", help="skip startup provider/model picker")
     p.add_argument("--resume", action="store_true", help="resume the latest Crypt session for this workspace")
     p.add_argument("--session", help="resume a specific Crypt session id or title prefix")
-    p.add_argument("command", nargs="?", choices=["login", "logout", "setup", "doctor"], help="login | logout | setup | doctor")
+    p.add_argument("--bench-suite", default=None, help="benchmark suite JSON path")
+    p.add_argument("--bench-task", action="append", help="benchmark task id to run; repeatable")
+    p.add_argument("--bench-max-tasks", type=int, help="maximum benchmark tasks to run")
+    p.add_argument("--bench-output", help="directory for benchmark run artifacts")
+    p.add_argument("--bench-list", action="store_true", help="list benchmark tasks without running a provider")
+    p.add_argument("--eval-prompt", help="prompt for eval-target; defaults to production upgrade prompt")
+    p.add_argument("--eval-check", action="append", help="verification command for eval-target; repeatable")
+    p.add_argument("--eval-output", help="directory for eval-target artifacts")
+    p.add_argument("--eval-max-turns", type=int, default=60, help="max model turns for eval-target")
+    p.add_argument(
+        "--eval-forbid-access",
+        action="append",
+        help="forbidden path glob for eval-target trace review; repeatable",
+    )
+    p.add_argument("--eval-no-clean", action="store_true", help="do not remove new generated cache artifacts")
+    p.add_argument("--eval-json", action="store_true", help="print eval-target JSON report")
+    p.add_argument(
+        "command",
+        nargs="?",
+        choices=["login", "logout", "setup", "doctor", "bench", "eval-target"],
+        help="login | logout | setup | doctor | bench | eval-target",
+    )
     args = p.parse_args()
 
     if args.command == "login":
@@ -58,6 +79,10 @@ def main() -> int:
 
         print(run_doctor(settings.resolve_workspace(args.cwd, saved)))
         return 0
+    if args.command == "bench":
+        return _do_bench(saved, args)
+    if args.command == "eval-target":
+        return _do_eval_target(saved, args)
     did_setup = False
     if _needs_setup(saved, args):
         saved = _do_setup(saved, args)
@@ -229,6 +254,7 @@ def _startup_choice(saved: dict, args: argparse.Namespace, skip: bool = False) -
         "provider",
         [
             (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
+            (settings.PROVIDER_OPENAI, "OpenAI (or compatible)"),
             (settings.PROVIDER_OLLAMA, "Ollama Cloud"),
         ],
         provider_name,
@@ -323,6 +349,60 @@ def _provider(
         host=settings.ollama_host(args.ollama_host, saved),
         think=not args.no_thinking,
     )
+
+
+def _do_bench(saved: dict, args: argparse.Namespace) -> int:
+    from core import bench
+
+    suite = args.bench_suite or str(bench.DEFAULT_SUITE)
+    if args.bench_list:
+        print(bench.list_tasks(suite))
+        return 0
+
+    provider_name = args.provider or settings.provider_default(saved)
+    cred = _credential(provider_name)
+
+    def provider_factory():
+        return _provider(args, saved, provider_name, cred)
+
+    try:
+        report = bench.run_suite(
+            provider_factory,
+            suite_path=suite,
+            output_root=args.bench_output,
+            task_ids=args.bench_task,
+            max_tasks=args.bench_max_tasks,
+        )
+    except Exception as e:
+        ui.error(f"bench failed: {type(e).__name__}: {e}")
+        return 1
+    print(bench.format_report(report))
+    return 0 if report.success else 1
+
+
+def _do_eval_target(saved: dict, args: argparse.Namespace) -> int:
+    from core import target_eval
+
+    provider_name = args.provider or settings.provider_default(saved)
+    cred = _credential(provider_name)
+    cwd = settings.resolve_workspace(args.cwd, saved)
+    provider = _provider(args, saved, provider_name, cred)
+    try:
+        report = target_eval.run_target(
+            provider,
+            cwd=cwd,
+            prompt=args.eval_prompt,
+            checks=args.eval_check,
+            output_root=args.eval_output,
+            max_turns=args.eval_max_turns,
+            forbidden_access=args.eval_forbid_access,
+            cleanup=not args.eval_no_clean,
+        )
+    except Exception as e:
+        ui.error(f"eval-target failed: {type(e).__name__}: {e}")
+        return 1
+    print(report.to_json() if args.eval_json else target_eval.format_report(report))
+    return 0 if report.success else 1
 
 
 def _save_runtime_choice(

@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import time
-import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
-from . import background, compact, doctor, file_state, memory, prompt as prompt_builder, runtime, session as sessions, ui
+from . import artifacts, background, compact, doctor, file_state, memory, prompt as prompt_builder, runtime
+from . import session as sessions
+from . import tracing, ui
 from .api import Provider, TextDelta, ThinkingDelta, ToolUseProgress, ToolUseReady, TurnEnd
 from tools import REGISTRY, dispatch
 
@@ -31,11 +33,80 @@ Work like a careful engineer:
 """.strip()
 
 
+@dataclass
+class RunResult:
+    messages: list[dict]
+    final_text: str
+    current_tokens: int = 0
+    session_tokens: int = 0
+
+
 def _build_system_prompt() -> str:
     guidance = REGISTRY.prompts()
     if not guidance:
         return _BASE_SYSTEM
     return f"{_BASE_SYSTEM}\n\n# Tool guidance\n\n{guidance}"
+
+
+def run_prompt(
+    provider: Provider,
+    user_text: str,
+    *,
+    cwd: str = ".",
+    session_obj=None,
+    max_turns: int = 50,
+    approval_mode: str = runtime.APPROVAL_ALL,
+    show_thinking: bool = False,
+    render: bool = False,
+) -> RunResult:
+    """Run one prompt to completion without the interactive input loop.
+
+    This is the production entry point for benchmarks, CI smoke checks, and
+    scripted integrations. It uses the same provider/tool loop as the terminal
+    UI, but approvals are governed by ``approval_mode`` instead of prompts.
+    """
+    previous_mode = runtime.approval_mode()
+    previous_thinking = runtime.show_thinking()
+    messages: list[dict] = session_obj.load_messages() if session_obj else []
+    runtime.configure(provider, cwd, lambda prompt, context=None: _run_subagent(provider, prompt, context), session=session_obj)
+    runtime.set_show_thinking(show_thinking)
+    runtime.set_approval_mode(approval_mode)
+    REGISTRY.before_prompt()
+    user_msg = {"role": "user", "content": user_text}
+    messages.append(user_msg)
+    if runtime.session():
+        runtime.session().record_message(user_msg)
+    tracing.emit("run_start", mode="non_interactive", prompt=user_text, max_turns=max_turns)
+    try:
+        current_tokens, session_tokens = _run_until_done(
+            provider,
+            messages,
+            0,
+            compact.rough_tokens(messages),
+            max_turns=max_turns,
+            render=render,
+        )
+        final_text = _extract_text(messages[-1]) if messages else ""
+        tracing.emit(
+            "run_stop",
+            mode="non_interactive",
+            message_count=len(messages),
+            current_tokens=current_tokens,
+            session_tokens=session_tokens,
+            final_text=final_text[:1000],
+        )
+        return RunResult(
+            messages=messages,
+            final_text=final_text,
+            current_tokens=current_tokens,
+            session_tokens=session_tokens,
+        )
+    except Exception as exc:
+        tracing.emit("run_error", mode="non_interactive", error=f"{type(exc).__name__}: {exc}")
+        raise
+    finally:
+        runtime.set_approval_mode(previous_mode)
+        runtime.set_show_thinking(previous_thinking)
 
 
 def run(
@@ -51,6 +122,7 @@ def run(
     session_tokens = compact.rough_tokens(messages) if messages else 0
     runtime.configure(provider, cwd, lambda prompt, context=None: _run_subagent(provider, prompt, context), session=session_obj)
     runtime.set_show_thinking(show_thinking)
+    tracing.emit("session_start", mode="interactive", resumed=bool(messages), message_count=len(messages))
     if session_obj and messages:
         _restore_tool_state(messages)
         ui.info(f"resumed session {session_obj.id} with {len(messages)} message(s)")
@@ -215,7 +287,22 @@ def _run_until_done(
         artifact_tool_retry_used = False
         while used < budget:
             _ensure_tool_result_pairing(messages)
+            tracing.emit(
+                "model_turn_start",
+                turn=used + 1,
+                message_count=len(messages),
+                tool_count=len(tools),
+                subagent=is_subagent,
+            )
             end = _stream_with_retry(provider, messages, tools, loader, render=render)
+            tracing.emit(
+                "model_turn_end",
+                turn=used + 1,
+                stop_reason=end.stop_reason,
+                tool_uses=_tool_use_names(end.message),
+                usage=end.usage or {},
+                subagent=is_subagent,
+            )
             messages.append(end.message)
             if runtime.session() and not is_subagent:
                 runtime.session().record_message(end.message)
@@ -233,10 +320,10 @@ def _run_until_done(
                 if (
                     not is_subagent
                     and not artifact_tool_retry_used
-                    and _should_retry_text_only_artifact(messages, end.message)
+                    and artifacts.should_retry_text_only(messages, end.message)
                 ):
                     artifact_tool_retry_used = True
-                    correction = _artifact_tool_retry_message(messages)
+                    correction = artifacts.tool_retry_message(messages)
                     messages.append(correction)
                     if runtime.session():
                         runtime.session().append({"type": "message", "message": correction})
@@ -357,7 +444,7 @@ def _stream_one_turn(
     show_thinking = runtime.show_thinking() if render else False
     thinking_open = False
     text_open = False
-    buffer_artifact_text = render and _artifact_creation_requested(messages)
+    buffer_artifact_text = render and artifacts.creation_requested(messages)
     buffered_text: list[str] = []
     if render:
         ui.activity("waiting for provider response")
@@ -399,7 +486,7 @@ def _stream_one_turn(
                         thinking_open = False
                     buffered_text.append(event.text)
                     partial = "".join(buffered_text)
-                    if _looks_like_artifact_start(partial):
+                    if artifacts.looks_like_artifact_start(partial):
                         return TurnEnd(
                             stop_reason="text_artifact",
                             message={
@@ -490,12 +577,7 @@ def _dispatch_tool_uses(
             if render:
                 ui.info("sequential execution: OAuth concurrency is restricted")
             for block in tool_blocks:
-                ok, output = dispatch(
-                    block["name"],
-                    block.get("input") or {},
-                    render=render,
-                    tool_use_id=block.get("id", ""),
-                )
+                ok, output = _dispatch_one(block, render=render)
                 results.append(_tool_result_block(block, ok, output))
         else:
             results = _dispatch_parallel(tool_blocks, render=render)
@@ -503,12 +585,7 @@ def _dispatch_tool_uses(
         for idx, block in enumerate(tool_blocks):
             if render:
                 ui.activity(f"executing tool: {block.get('name', 'tool')}")
-            ok, output = dispatch(
-                block["name"],
-                block.get("input") or {},
-                render=render,
-                tool_use_id=block.get("id", ""),
-            )
+            ok, output = _dispatch_one(block, render=render)
             results.append(_tool_result_block(block, ok, output))
             if _should_abort_tool_batch(ok, output):
                 skipped = tool_blocks[idx + 1:]
@@ -551,7 +628,7 @@ def _dispatch_parallel(tool_blocks: list[dict], *, render: bool) -> list[dict]:
         ui.info(f"running {len(tool_blocks)} parallel-safe tool calls: {names}")
 
     def run_one(block: dict) -> dict:
-        ok, output = dispatch(block["name"], block.get("input") or {}, render=False)
+        ok, output = _dispatch_one(block, render=False)
         return _tool_result_block(block, ok, output)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -561,6 +638,29 @@ def _dispatch_parallel(tool_blocks: list[dict], *, render: bool) -> list[dict]:
         suffix = f" ({failures} failed)" if failures else ""
         ui.info(f"parallel tool calls complete{suffix}")
     return results
+
+
+def _dispatch_one(block: dict, *, render: bool) -> tuple[bool, str]:
+    tool_name = str(block.get("name", ""))
+    tool_id = str(block.get("id", ""))
+    args = block.get("input") or {}
+    tracing.emit("tool_start", tool_id=tool_id, tool=tool_name, args=args)
+    started = time.perf_counter()
+    ok, output = dispatch(
+        tool_name,
+        args,
+        render=render,
+        tool_use_id=tool_id if render else "",
+    )
+    tracing.emit(
+        "tool_end",
+        tool_id=tool_id,
+        tool=tool_name,
+        ok=ok,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+        output=str(output)[:1000],
+    )
+    return ok, output
 
 
 def _tool_result_block(block: dict, ok: bool, output) -> dict:
@@ -647,6 +747,14 @@ def _has_tool_use(msg: dict) -> bool:
     )
 
 
+def _tool_use_names(msg: dict) -> list[str]:
+    return [
+        str(b.get("name", ""))
+        for b in msg.get("content", [])
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+    ]
+
+
 def _ensure_tool_result_pairing(messages: list[dict]) -> None:
     for i, msg in enumerate(messages):
         if msg.get("role") != "assistant":
@@ -686,131 +794,6 @@ def _extract_text(message: dict) -> str:
     ).strip()
 
 
-_ARTIFACT_ACTION_RE = re.compile(
-    r"\b(make|create|build|generate|generated|write|code|craft|produce|scaffold|implement)\b",
-    re.I,
-)
-_ARTIFACT_TARGET_RE = re.compile(
-    r"\b(html|web\s*page|website|site|app|component|script|program|file|css|javascript|js|typescript|ts|python|py|json|markdown|md|readme|dashboard|game|animation|animated|landing\s*page)\b",
-    re.I,
-)
-_FENCED_ARTIFACT_RE = re.compile(
-    r"```(?:[A-Za-z0-9_+.-]+)?\s*\n[\s\S]{250,}?```",
-    re.M,
-)
-_FENCED_ARTIFACT_START_RE = re.compile(
-    r"```(?:html|css|javascript|js|typescript|ts|python|py|json|markdown|md)\b",
-    re.I,
-)
-_HTML_ARTIFACT_RE = re.compile(r"<!DOCTYPE\s+html|<html(?:\s|>)", re.I)
-
-
-def _last_textual_user_message(messages: list[dict]) -> str:
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        text = _extract_text(msg)
-        if text:
-            return text
-    return ""
-
-
-def _last_real_user_request(messages: list[dict]) -> str:
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        text = _extract_text(msg)
-        if not text:
-            continue
-        if text.startswith("Crypt harness correction:"):
-            continue
-        return text
-    return ""
-
-
-def _recent_textual_user_messages(messages: list[dict], limit: int = 3) -> list[str]:
-    out: list[str] = []
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        text = _extract_text(msg)
-        if text:
-            out.append(text)
-            if len(out) >= limit:
-                break
-    return out
-
-
-def _artifact_creation_requested(messages: list[dict]) -> bool:
-    for text in _recent_textual_user_messages(messages):
-        if (
-            _ARTIFACT_ACTION_RE.search(text)
-            and _ARTIFACT_TARGET_RE.search(text)
-        ):
-            return True
-    return False
-
-
-def _should_retry_text_only_artifact(messages: list[dict], assistant_msg: dict) -> bool:
-    if not _artifact_creation_requested(messages):
-        return False
-    text = _extract_text(assistant_msg)
-    if not text:
-        return False
-    return bool(
-        _looks_like_artifact_start(text)
-        or _FENCED_ARTIFACT_RE.search(text)
-        or _HTML_ARTIFACT_RE.search(text)
-    )
-
-
-def _last_real_user_index(messages: list[dict]) -> int:
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if msg.get("role") != "user":
-            continue
-        text = _extract_text(msg)
-        if not text or text.startswith("Crypt harness correction:"):
-            continue
-        content = msg.get("content")
-        if isinstance(content, list) and any(
-            isinstance(block, dict) and block.get("type") == "tool_result"
-            for block in content
-        ):
-            continue
-        return i
-    return 0
-
-
-def _successful_tool_names_since_last_request(messages: list[dict]) -> set[str]:
-    start = _last_real_user_index(messages)
-    tool_names: dict[str, str] = {}
-    successes: set[str] = set()
-    for msg in messages[start + 1:]:
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        if msg.get("role") == "assistant":
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("id")
-                ):
-                    tool_names[str(block["id"])] = str(block.get("name", ""))
-        elif msg.get("role") == "user":
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_result"
-                    and not block.get("is_error")
-                ):
-                    name = tool_names.get(str(block.get("tool_use_id", "")))
-                    if name:
-                        successes.add(name)
-    return successes
-
-
 def _maybe_complete_todos_after_final(messages: list[dict]) -> None:
     try:
         from tools import todos
@@ -818,45 +801,13 @@ def _maybe_complete_todos_after_final(messages: list[dict]) -> None:
         current = todos.get_todos()
         if not current or all(item.get("status") == "done" for item in current):
             return
-        if not _artifact_creation_requested(messages):
+        if not artifacts.creation_requested(messages):
             return
-        successful = _successful_tool_names_since_last_request(messages)
+        successful = artifacts.successful_tool_names_since_last_request(messages)
         if successful.intersection({"write_file", "edit_file", "multi_edit", "open_file"}):
             todos.complete_all()
     except Exception:
         return
-
-
-def _looks_like_artifact_start(text: str) -> bool:
-    if not text:
-        return False
-    if _HTML_ARTIFACT_RE.search(text):
-        return True
-    if _FENCED_ARTIFACT_START_RE.search(text):
-        return True
-    return bool(len(text) >= 600 and re.search(r"```\w*", text))
-
-
-def _artifact_tool_retry_message(messages: list[dict]) -> dict:
-    request = _last_textual_user_message(messages)
-    wants_open = bool(re.search(r"\b(open|launch|show)\b", request, re.I))
-    open_instruction = (
-        " After write_file succeeds, call open_file for the generated file."
-        if wants_open
-        else ""
-    )
-    return {
-        "role": "user",
-        "content": [{
-            "type": "text",
-            "text": (
-                "Crypt harness correction: you pasted the artifact in chat instead of using tools. "
-                "Do not paste the code again. Call write_file with a sensible filename and the full "
-                f"artifact content.{open_instruction} Keep narration minimal."
-            ),
-        }],
-    }
-
 
 def _render_buffered_assistant_text(message: dict) -> None:
     text = _extract_text(message)

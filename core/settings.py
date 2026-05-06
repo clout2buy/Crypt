@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import getpass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -112,8 +114,7 @@ def save_config(data: dict) -> None:
     tmp = CONFIG_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     tmp.replace(CONFIG_PATH)
-    if os.name != "nt":
-        os.chmod(CONFIG_PATH, 0o600)
+    restrict_file_permissions(CONFIG_PATH)
 
 
 def update_config(**values: object) -> dict:
@@ -210,3 +211,37 @@ def _is_bad_launch_cwd(path: Path) -> bool:
     return (
         "windows" in parts and "system32" in parts
     ) or "\\program files\\windowsapps" in text
+
+
+def restrict_file_permissions(path: Path) -> bool:
+    """Best-effort owner-only permissions for sensitive Crypt files."""
+    try:
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+            return True
+        user = _windows_user()
+        result = subprocess.run(
+            [
+                "icacls",
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                f"{user}:F",
+                "SYSTEM:F",
+                "Administrators:F",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _windows_user() -> str:
+    user = getpass.getuser()
+    domain = os.environ.get("USERDOMAIN")
+    if domain and "\\" not in user:
+        return f"{domain}\\{user}"
+    return user

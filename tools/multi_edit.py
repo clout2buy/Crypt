@@ -19,7 +19,10 @@ or a list of edits for that file (applied in order, atomically per file).
 """
 from __future__ import annotations
 
+import os
+import uuid
 from collections import OrderedDict
+from pathlib import Path
 
 from core import file_state
 
@@ -63,7 +66,7 @@ def _normalize_changes(args: dict) -> list[tuple[str, list[tuple[str, str]]]]:
     return list(by_path.items())
 
 
-def _resolve_and_check(path_str: str) -> "Path":  # type: ignore[name-defined]
+def _resolve_and_check(path_str: str) -> Path:
     path = resolve(path_str)
     if not path.exists():
         raise FileNotFoundError(rel(path))
@@ -79,7 +82,7 @@ def run(args: dict) -> str:
     # Phase 1 — dry-run every file. Any failure here aborts before any
     # write. Failures get prefixed with the path so the model can map the
     # error back to the offending change.
-    plans: list[tuple[str, "Path", str, str, str]] = []  # (path_str, path, original, new_text, newline)
+    plans: list[tuple[str, Path, str, str, str]] = []  # (path_str, path, original, new_text, newline)
     errors: list[str] = []
     for path_str, edits in grouped:
         try:
@@ -95,21 +98,29 @@ def run(args: dict) -> str:
             f"multi_edit aborted; no files were modified.\n{joined}"
         )
 
-    # Phase 2 — write everything. If a write fails midway (rare: out of
-    # disk, permission), files already written stay written. We surface
-    # which files succeeded so the user can decide how to recover.
-    written: list[str] = []
+    # Phase 2 - write everything through same-directory temp files. If a write
+    # fails after earlier files were replaced, roll those earlier files back to
+    # their original bytes before surfacing the error.
+    written: list[tuple[Path, bytes]] = []
     for path_str, path, _original, new_text, newline in plans:
         try:
+            file_state.assert_fresh_for_edit(path)
+            original_bytes = path.read_bytes()
             final = new_text.replace("\n", newline) if newline != "\n" else new_text
-            path.write_bytes(final.encode("utf-8"))
+            _atomic_write(path, final.encode("utf-8"))
             file_state.record_write(path)
-            written.append(rel(path))
-        except OSError as e:
-            partial = ", ".join(written) or "(none)"
+            written.append((path, original_bytes))
+        except Exception as e:
+            rollback_errors = _rollback(written)
+            detail = f"{type(e).__name__}: {e}"
+            if rollback_errors:
+                raise RuntimeError(
+                    f"write failed at {rel(path)}: {detail}. "
+                    "Rollback also failed: " + "; ".join(rollback_errors)
+                ) from e
             raise RuntimeError(
-                f"write failed at {rel(path)}: {e}. "
-                f"Partial state — these files were already updated: {partial}"
+                f"write failed at {rel(path)}: {detail}. "
+                "Earlier file updates were rolled back."
             ) from e
 
     summary_lines = [f"edited {len(plans)} file(s):"]
@@ -119,6 +130,29 @@ def run(args: dict) -> str:
         if diff:
             summary_lines.append(diff)
     return "\n".join(summary_lines)
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    tmp = path.with_name(f".{path.name}.crypt-{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _rollback(written: list[tuple[Path, bytes]]) -> list[str]:
+    errors: list[str] = []
+    for path, original in reversed(written):
+        try:
+            _atomic_write(path, original)
+            file_state.record_write(path)
+        except Exception as e:
+            errors.append(f"{rel(path)}: {type(e).__name__}: {e}")
+    return errors
 
 
 def preview(args: dict) -> str:
@@ -167,6 +201,8 @@ _PROMPT = """
 Apply edits across one or more files atomically. All edits are validated
 before anything is written; if any single edit fails (no match, ambiguous
 match, missing file), nothing is modified and you get a combined error.
+Writes use same-directory temp replacement; if a later write fails, earlier
+successful replacements are rolled back before the error is returned.
 
 Use this instead of multiple edit_file calls when:
 - The same change touches several files (rename, type narrowing, import
@@ -185,7 +221,7 @@ TOOL = Tool(
     "multi_edit",
     (
         "Apply edits to one or more files atomically. Validates all edits "
-        "before writing anything; partial application is impossible."
+        "before writing anything and rolls back earlier writes on failure."
     ),
     {
         "type": "object",

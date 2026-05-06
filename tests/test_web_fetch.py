@@ -1,6 +1,10 @@
 """Web fetch sandbox: SSRF defense + allow/deny lists."""
 from __future__ import annotations
 
+import io
+import urllib.error
+from email.message import Message
+
 import pytest
 
 from tools import web_fetch
@@ -45,6 +49,25 @@ def test_host_glob_match():
 def test_non_http_scheme_refused():
     with pytest.raises(ValueError, match="http"):
         web_fetch.run({"url": "file:///etc/passwd"})
+
+
+def test_redirect_to_loopback_refused(monkeypatch):
+    headers = Message()
+    headers["Location"] = "http://127.0.0.1/admin"
+    err = urllib.error.HTTPError(
+        "https://public.example/start",
+        302,
+        "Found",
+        headers,
+        io.BytesIO(b""),
+    )
+
+    def fake_open(req, *, timeout):
+        raise err
+
+    monkeypatch.setattr(web_fetch, "_open_request", fake_open)
+    with pytest.raises(PermissionError, match="private"):
+        web_fetch.run({"url": "https://public.example/start"})
 
 
 def test_empty_url_refused():

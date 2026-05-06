@@ -314,19 +314,9 @@ def _process_event(event_type, data, content_blocks, usage):
         return
 
     if event_type == "content_block_stop":
-        try:
-            index = int(data.get("index", 0))
-        except (TypeError, ValueError):
-            return
-        if index < 0 or index >= len(content_blocks) or content_blocks[index] is None:
-            return
-        block = content_blocks[index]
-        if block.get("type") == "tool_use" and not block.get("_ready_sent"):
-            block["_ready_sent"] = True
-            yield ToolUseReady(
-                message=_finalized_assistant_message(content_blocks),
-                usage=dict(usage),
-            )
+        # The content block is complete, but the assistant message may contain
+        # more tool_use blocks after this one. Dispatch happens after TurnEnd so
+        # multi-tool turns stay intact and can use the loop's parallel path.
         return
 
     if event_type == "message_delta":
@@ -557,17 +547,6 @@ class OpenAIProvider:
                                 call_id=slot.get("id", ""),
                                 argument_chars=len(slot.get("arguments") or ""),
                             )
-                        ready = _openai_tool_block(idx, slot)
-                        if ready is not None:
-                            content: list[dict] = []
-                            if text_buf:
-                                content.append({"type": "text", "text": "".join(text_buf)})
-                            content.append(ready)
-                            yield ToolUseReady(
-                                message={"role": "assistant", "content": content}
-                            )
-                            return
-
         content: list[dict] = []
         if text_buf:
             content.append({"type": "text", "text": "".join(text_buf)})

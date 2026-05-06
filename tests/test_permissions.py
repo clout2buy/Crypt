@@ -67,7 +67,7 @@ def test_cache_invalidated_on_mtime_change(rules_file):
     assert permissions.check("bash", "foo bar")[0] == "allow"
 
     # Rewrite with different rules; mtime changes → cache must reload.
-    import os, time
+    import os
     new_mtime = rules_file.stat().st_mtime + 5
     write(rules_file, allow=["bash:baz*"])
     os.utime(rules_file, (new_mtime, new_mtime))

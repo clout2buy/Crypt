@@ -17,6 +17,8 @@ from .types import Tool
 
 
 MAX_BYTES = 2_000_000
+_MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 # Comma-separated domain allowlist. When set, web_fetch refuses any URL
 # whose host doesn't match (exact or `*.suffix` style). Unset means anything
@@ -24,6 +26,14 @@ MAX_BYTES = 2_000_000
 _ALLOWLIST_ENV = "CRYPT_WEB_ALLOWED_HOSTS"
 # Same shape as allowlist but for blocks. Always applied.
 _DENYLIST_ENV = "CRYPT_WEB_DENIED_HOSTS"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 class _HTMLText(HTMLParser):
@@ -74,53 +84,40 @@ def run(args: dict) -> str:
     url = str(args["url"]).strip()
     if not url:
         raise ValueError("url is required")
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("only http/https URLs are supported")
-
-    host = (parsed.hostname or "").lower()
-    if not host:
-        raise ValueError("URL has no host")
-
-    # SSRF defense: refuse to fetch from private/loopback/link-local addresses.
-    # Stops a redirect from yanking the harness onto an internal admin page.
-    blocked = _check_private_address(host)
-    if blocked and not os.getenv("CRYPT_WEB_ALLOW_PRIVATE"):
-        raise PermissionError(
-            f"refusing to fetch a private/loopback host ({blocked}). "
-            f"Set CRYPT_WEB_ALLOW_PRIVATE=1 to override."
-        )
-
-    deny = _hostlist_from_env(_DENYLIST_ENV)
-    if deny and _host_matches(host, deny):
-        raise PermissionError(f"host {host!r} is in {_DENYLIST_ENV}")
-
-    allow = _hostlist_from_env(_ALLOWLIST_ENV)
-    if allow and not _host_matches(host, allow):
-        raise PermissionError(
-            f"host {host!r} is not in {_ALLOWLIST_ENV}={','.join(allow)}"
-        )
-
     timeout = int_arg(args, "timeout", 20, 120)
     limit = int_arg(args, "limit", 20_000, 80_000)
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": f"crypt/{CRYPT_VERSION} (+https://github.com/clout2buy/Crypt)",
-            "Accept": "text/html,text/plain,application/json,*/*;q=0.8",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = getattr(resp, "status", 0)
-            ctype = resp.headers.get("content-type", "")
-            final_url = resp.geturl()
-            data = resp.read(MAX_BYTES + 1)
-    except urllib.error.HTTPError as e:
-        data = e.read(200_000)
-        status = e.code
-        ctype = e.headers.get("content-type", "")
-        final_url = url
+
+    current_url = url
+    for redirect_count in range(_MAX_REDIRECTS + 1):
+        _validate_url_policy(current_url)
+        req = urllib.request.Request(
+            current_url,
+            headers={
+                "User-Agent": f"crypt/{CRYPT_VERSION} (+https://github.com/clout2buy/Crypt)",
+                "Accept": "text/html,text/plain,application/json,*/*;q=0.8",
+            },
+        )
+        try:
+            with _open_request(req, timeout=timeout) as resp:
+                status = getattr(resp, "status", 0)
+                ctype = resp.headers.get("content-type", "")
+                final_url = resp.geturl()
+                _validate_url_policy(final_url)
+                data = resp.read(MAX_BYTES + 1)
+                break
+        except urllib.error.HTTPError as e:
+            if e.code in _REDIRECT_STATUSES and e.headers.get("location"):
+                if redirect_count >= _MAX_REDIRECTS:
+                    raise RuntimeError(f"too many redirects fetching {url}") from e
+                current_url = urllib.parse.urljoin(current_url, e.headers["location"])
+                continue
+            data = e.read(200_000)
+            status = e.code
+            ctype = e.headers.get("content-type", "")
+            final_url = current_url
+            break
+    else:  # pragma: no cover - loop exits via break/raise
+        raise RuntimeError(f"too many redirects fetching {url}")
     if len(data) > MAX_BYTES:
         data = data[:MAX_BYTES]
         truncated_bytes = True
@@ -152,6 +149,41 @@ def run(args: dict) -> str:
     if truncated_bytes:
         head.append(f"note: response exceeded {MAX_BYTES} bytes and was truncated before text extraction")
     return "\n".join(head) + "\n\n" + clip(body, limit)
+
+
+def _open_request(req, *, timeout: int):
+    return _OPENER.open(req, timeout=timeout)
+
+
+def _validate_url_policy(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("only http/https URLs are supported")
+
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ValueError("URL has no host")
+
+    # SSRF defense: refuse to fetch from private/loopback/link-local addresses.
+    # This is called for the original URL, every redirect target, and the final
+    # response URL reported by the transport.
+    blocked = _check_private_address(host)
+    if blocked and not os.getenv("CRYPT_WEB_ALLOW_PRIVATE"):
+        raise PermissionError(
+            f"refusing to fetch a private/loopback host ({blocked}). "
+            f"Set CRYPT_WEB_ALLOW_PRIVATE=1 to override."
+        )
+
+    deny = _hostlist_from_env(_DENYLIST_ENV)
+    if deny and _host_matches(host, deny):
+        raise PermissionError(f"host {host!r} is in {_DENYLIST_ENV}")
+
+    allow = _hostlist_from_env(_ALLOWLIST_ENV)
+    if allow and not _host_matches(host, allow):
+        raise PermissionError(
+            f"host {host!r} is not in {_ALLOWLIST_ENV}={','.join(allow)}"
+        )
+    return host
 
 
 def _charset(content_type: str) -> str | None:

@@ -44,15 +44,24 @@ def start(command: str, cwd: str | None = None, description: str = "") -> Job:
     )
     f.write(header.encode("utf-8", errors="replace"))
     f.flush()
-    proc = subprocess.Popen(
-        command,
-        shell=True,
-        cwd=workdir,
-        stdout=f,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
-    )
+    settings.restrict_file_permissions(out_path)
+    popen_kwargs = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["preexec_fn"] = os.setsid
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=workdir,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            **popen_kwargs,
+        )
+    finally:
+        f.close()
     job = Job(job_id, command, workdir, out_path, time.time(), proc, description)
     _JOBS[job_id] = job
     return job
@@ -97,15 +106,29 @@ def kill(job_id: str) -> str:
     if job.process.poll() is not None:
         return f"job {job.id} already {status(job)}"
     if os.name == "nt":
-        job.process.send_signal(signal.CTRL_BREAK_EVENT)
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(job.process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            job.process.send_signal(signal.CTRL_BREAK_EVENT)
         time.sleep(0.5)
         if job.process.poll() is None:
             job.process.kill()
     else:
-        job.process.terminate()
+        try:
+            os.killpg(os.getpgid(job.process.pid), signal.SIGTERM)
+        except Exception:
+            job.process.terminate()
         time.sleep(0.5)
         if job.process.poll() is None:
-            job.process.kill()
+            try:
+                os.killpg(os.getpgid(job.process.pid), signal.SIGKILL)
+            except Exception:
+                job.process.kill()
     return f"job {job.id} killed"
 
 

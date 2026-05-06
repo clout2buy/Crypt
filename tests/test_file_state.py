@@ -44,7 +44,7 @@ def test_mtime_only_change_tolerated(tmp_path: Path):
     p.write_text("hello")
     file_state.record_read(p, data)
     # Force a stat change with same content.
-    import os, time
+    import os
     new_mtime = p.stat().st_mtime + 10
     os.utime(p, (new_mtime, new_mtime))
     file_state.assert_fresh_for_edit(p)

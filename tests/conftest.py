@@ -7,7 +7,6 @@ Keeps tests fast and isolated:
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 

@@ -25,6 +25,8 @@ spinners.
 pip install -r requirements.txt
 python main.py setup       # interactive: pick provider, model, workspace
 python main.py doctor      # 11 self-checks; verifies your environment
+python main.py bench --bench-list
+python main.py eval-target --cwd D:\your-project --eval-check "pytest -q"
 python main.py             # launch the agent
 ```
 
@@ -231,6 +233,42 @@ including the danger prompt (you opted in by name).
 
 ---
 
+## Benchmarks, Target Evals, and Traces
+
+Crypt includes a non-interactive run path, a benchmark runner, and a real-repo
+target evaluator so quality can be measured instead of guessed.
+
+```bash
+python main.py bench --bench-list
+python main.py bench --provider openai --model gpt-5-mini --bench-max-tasks 1
+python main.py bench --bench-suite benchmarks/smoke.json
+python main.py eval-target --cwd D:\DoingBot --provider ollama --model deepseek-v4-pro:cloud
+python main.py eval-target --cwd D:\DoingBot --eval-check "python -m pytest tests -q"
+```
+
+Benchmark runs create isolated git workspaces under
+`~/.crypt/bench-runs/<run>/`, run the real agent loop, execute task checks,
+and score unwanted file churn such as edited tests or touched secret files.
+
+Target evals run against an existing repo and write results under
+`~/.crypt/target-evals/<run>/`. Each run snapshots the repo before editing,
+runs the model, removes new cache artifacts, auto-detects or runs requested
+checks, compares the before/after tree, scans the trace for forbidden path
+access, and emits review findings for shallow wins:
+
+- behavior or return-contract changes without targeted tests
+- packaging metadata that omits top-level modules or entry points
+- tests that copy production logic instead of exercising it
+- production changes with no test changes
+- generated cache/build artifacts left in the diff
+
+Each benchmark task and target eval writes a structured JSONL trace with model
+turns, tool starts, tool finishes, durations, and redacted arguments. Set
+`CRYPT_TRACE=0` to disable trace writes, or
+`CRYPT_TRACE_PATH=/path/to/trace.jsonl` to force a specific sink.
+
+---
+
 ## Project Instructions
 
 Crypt auto-loads project guidance from the workspace and parents:
@@ -273,6 +311,9 @@ core/
   loop.py            interactive think-act-observe loop
   prompt.py          modular system prompt builder
   session.py         append-only JSONL transcripts and resume lookup
+  bench.py           isolated benchmark runner and report writer
+  target_eval.py     real-repo eval runner, cleanup, checks, review gates
+  tracing.py         structured JSONL trace events for audit/evals
   compact.py         conversation + per-tool-result micro-compaction
   memory.py          durable memory and project instruction loading
   permissions.py     ~/.crypt/permissions.json allow/deny rules
@@ -304,12 +345,15 @@ to continue. The message array is the only state.
 ```bash
 pip install -r requirements-dev.txt
 pytest
+ruff check .
 ```
 
-111 tests covering the load-bearing pieces:
+Tests covering the load-bearing pieces:
 
 - Provider streaming contracts (Anthropic SSE, OpenAI Chat Completions,
   Ollama via the Anthropic SDK)
+- Non-interactive agent runs, benchmark scoring, and trace redaction
+- Real-repo target eval review gates and generated-artifact cleanup
 - Eager tool dispatch, partial-arg progress, and turn-end finalization
 - Per-tool lifecycle UI (queued / approval / running / ok / err)
 - Full + micro compaction
@@ -333,9 +377,12 @@ pytest
   config.json          provider, model, workspace defaults
   permissions.json     optional allow/deny rules (you create this)
   memory/MEMORY.md     durable user memory index + entries
+  bench-runs/          isolated benchmark workspaces and reports
+  target-evals/        before snapshots, traces, and reports for real repos
   projects/<slug>/     per-workspace session JSONLs
   runs/                bash output spill files for oversized commands
   tasks/<sid>/         background shell job logs
+  traces/              structured JSONL traces when session-backed
 ```
 
 ---

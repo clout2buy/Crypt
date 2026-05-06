@@ -17,7 +17,6 @@ from core.api import (
     TextDelta,
     ThinkingDelta,
     ToolUseProgress,
-    ToolUseReady,
     TurnEnd,
     _normalize_ollama_host,
 )
@@ -123,7 +122,7 @@ def test_stream_turn_emits_thinking_deltas(monkeypatch):
     assert thinking[0].text == "let me see..."
 
 
-def test_stream_turn_emits_tool_use_progress_and_ready(monkeypatch):
+def test_stream_turn_emits_tool_use_progress_and_final_tool_message(monkeypatch):
     """content_block_start (tool_use) → ToolUseProgress; content_block_stop → ToolUseReady.
 
     This is the eager-dispatch path that makes the per-tool live row
@@ -158,9 +157,9 @@ def test_stream_turn_emits_tool_use_progress_and_ready(monkeypatch):
     assert progress[0].call_id == "toolu_1"
     assert progress[-1].argument_chars > 0
 
-    ready = [ev for ev in out if isinstance(ev, ToolUseReady)]
-    assert len(ready) == 1
-    tool_block = [b for b in ready[0].message["content"] if b["type"] == "tool_use"][0]
+    turn_end = [ev for ev in out if isinstance(ev, TurnEnd)]
+    assert len(turn_end) == 1
+    tool_block = [b for b in turn_end[0].message["content"] if b["type"] == "tool_use"][0]
     assert tool_block["name"] == "write_file"
     assert tool_block["input"] == {"path": "x.html", "content": "<p/>"}
 

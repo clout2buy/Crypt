@@ -305,7 +305,7 @@ def _missing_required(tool: Tool, args: dict) -> list[str]:
         return []
     return [
         name for name in required
-        if name not in args or args.get(name) in (None, "")
+        if name not in args
     ]
 
 
@@ -324,7 +324,7 @@ def _validate_object(schema: dict, value, *, path: str) -> list[str]:
         missing = [
             str(name)
             for name in required
-            if name not in value or value.get(name) in (None, "")
+            if name not in value
         ]
         if missing:
             label = f"{path}." if path else ""
