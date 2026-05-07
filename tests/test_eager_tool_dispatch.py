@@ -509,7 +509,7 @@ def test_artifact_request_shows_real_stream_activity(monkeypatch, workspace):
         render=True,
     )
 
-    assert "waiting for provider response" in seen
+    assert "waiting for file tool call" in seen
     assert "receiving text stream" in seen
     assert "response complete" in seen
 
@@ -549,6 +549,6 @@ def test_real_stream_activity_survives_after_plan_approval(monkeypatch, workspac
         render=True,
     )
 
-    assert "waiting for provider response" in seen
+    assert "waiting for file tool call" in seen
     assert "receiving text stream" in seen
     assert "response complete" in seen

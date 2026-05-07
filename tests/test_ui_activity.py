@@ -188,6 +188,27 @@ def test_status_includes_spinner(monkeypatch):
         ui._state["activity"] = "idle"
 
 
+def test_activity_does_not_refresh_when_label_is_unchanged(monkeypatch):
+    class Live:
+        def __init__(self):
+            self.calls = 0
+
+        def update(self, *args, **kwargs):
+            self.calls += 1
+
+    live = Live()
+    ui._state["live"] = live
+    ui._state["activity"] = "planning file tool call"
+    try:
+        ui.activity("planning file tool call")
+        assert live.calls == 0
+        ui.activity("receiving tool args: write_file")
+        assert live.calls == 1
+    finally:
+        ui._state["live"] = None
+        ui._state["activity"] = "idle"
+
+
 def test_status_shows_abort_hint_after_long_wait(monkeypatch):
     """After 15s of no chunks, the status surfaces ctrl+c / /model hint."""
     monkeypatch.setattr(ui.time, "monotonic", lambda: 120.0)
@@ -216,6 +237,41 @@ def test_status_hides_abort_hint_once_chunks_arrive(monkeypatch):
     finally:
         ui._state["loader_start"] = 0.0
         ui._state["activity"] = "idle"
+        ui._state["stream_chars"] = 0
+
+
+def test_artifact_hidden_thinking_does_not_surface_internal_stream(monkeypatch, workspace):
+    from core import loop, runtime
+    from core.api import ThinkingDelta, TurnEnd
+
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def stream_turn(self, messages, tools, system):
+            yield ThinkingDelta("private planning")
+            yield TurnEnd(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            )
+
+    runtime.configure(Provider(), str(workspace), session=None)
+    runtime.set_show_thinking(False)
+    ui._state["stream_kind"] = ""
+    ui._state["stream_chars"] = 0
+    try:
+        loop._stream_one_turn(
+            Provider(),
+            messages=[{"role": "user", "content": "make an interactive html"}],
+            tools=[],
+            loader=loop._SilentLoader(),
+            render=True,
+        )
+        assert ui._state["stream_kind"] == ""
+        assert ui._state["stream_chars"] == 0
+    finally:
+        ui._state["stream_kind"] = ""
         ui._state["stream_chars"] = 0
 
 

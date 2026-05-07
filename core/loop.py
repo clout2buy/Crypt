@@ -451,7 +451,10 @@ def _stream_one_turn(
     buffer_artifact_text = render and artifacts.creation_requested(messages)
     buffered_text: list[str] = []
     if render:
-        ui.activity("waiting for provider response")
+        if buffer_artifact_text:
+            ui.activity("waiting for file tool call")
+        else:
+            ui.activity("waiting for provider response")
 
     try:
         system_prompt = prompt_builder.build_system_prompt(
@@ -475,8 +478,10 @@ def _stream_one_turn(
                         ui.activity("receiving reasoning stream")
                         ui.stream_delta("reasoning", event.text)
                     else:
-                        ui.activity("model planning before next action")
-                        ui.stream_delta("internal", event.text)
+                        if buffer_artifact_text:
+                            ui.activity("planning file tool call")
+                        else:
+                            ui.activity("model planning before next action")
                 if not show_thinking:
                     continue
                 if not thinking_open:

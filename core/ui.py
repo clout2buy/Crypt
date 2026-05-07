@@ -1184,7 +1184,10 @@ def tool_progress_clear() -> None:
 
 
 def activity(label: str) -> None:
-    _state["activity"] = str(label or "waiting")
+    next_label = str(label or "waiting")
+    if _state.get("activity") == next_label:
+        return
+    _state["activity"] = next_label
     live = _state["live"]
     if live is not None and _state.get("tool_progress") is None:
         live.update(_LiveRenderable(), refresh=True)
