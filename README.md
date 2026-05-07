@@ -77,8 +77,8 @@ python main.py
 Local Ollama is the zero-config default provider for a fresh checkout.
 Crypt connects to `http://localhost:11434` and uses the default bearer
 token local Ollama accepts. Anthropic OAuth is never used for Ollama.
-Cloud calls are opt-in: set `OLLAMA_HOST=https://ollama.com` and
-`OLLAMA_API_KEY`, then choose a `*-cloud` model.
+Cloud calls are opt-in: set `OLLAMA_API_KEY` and choose a `*-cloud`
+model. Crypt routes cloud models to `https://ollama.com` automatically.
 
 Crypt also defaults to `auto-edits` approval: file writes, edits, and
 opening generated files run without a second prompt, while shell commands

@@ -116,6 +116,8 @@ def main() -> int:
             )
             host = settings.ollama_host(args.ollama_host, saved)
             model_override = _pick_model(provider_name, saved, host=host)
+            if provider_name == settings.PROVIDER_OLLAMA:
+                host = settings.ollama_host_for_model(model_override, host)
             if (
                 provider_name == settings.PROVIDER_OLLAMA
                 and settings.is_ollama_cloud_host(host)
@@ -229,8 +231,9 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
         if not os.getenv("OPENAI_API_KEY"):
             ui.info("OPENAI_API_KEY is not set; set it before using OpenAI")
     else:
-        host = settings.client_host(args.ollama_host or saved.get("ollama_host") or settings.OLLAMA_HOST)
+        host = settings.ollama_host(args.ollama_host, saved)
         model = args.model or _pick_model(provider, saved, host=host)
+        host = settings.ollama_host_for_model(model, host)
         values = {
             "workspace": str(workspace),
             "provider": provider,
@@ -381,7 +384,7 @@ def _provider(
 
     host = settings.ollama_host(args.ollama_host, saved)
     model = model_override or args.model or settings.model_default(provider_name, saved)
-    model = settings.compatible_ollama_model(model, host)
+    host = settings.ollama_host_for_model(model, host)
     return OllamaProvider(
         model=model,
         host=host,

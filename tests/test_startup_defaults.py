@@ -129,9 +129,9 @@ def test_ollama_model_choices_match_host():
     assert "gpt-oss:20b" not in cloud
 
 
-def test_cloud_model_is_replaced_for_local_host():
-    assert settings.compatible_ollama_model("glm-5.1:cloud", "http://localhost:11434") == "gpt-oss:20b"
-    assert settings.compatible_ollama_model("glm-5.1:cloud", "https://ollama.com") == "glm-5.1:cloud"
+def test_cloud_model_routes_to_cloud_host():
+    assert settings.ollama_host_for_model("glm-5.1:cloud", "http://localhost:11434") == "https://ollama.com"
+    assert settings.ollama_host_for_model("gpt-oss:20b", "https://ollama.com") == "https://ollama.com"
 
 
 def test_ollama_provider_does_not_think_unless_thinking_is_shown(monkeypatch):
@@ -142,6 +142,15 @@ def test_ollama_provider_does_not_think_unless_thinking_is_shown(monkeypatch):
 
     assert provider._think is False
     assert shown_provider._think is True
+
+
+def test_provider_routes_cloud_model_to_cloud_host(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    provider = main._provider(_args(model="glm-5.1:cloud"), {}, settings.PROVIDER_OLLAMA)
+
+    assert provider.model == "glm-5.1:cloud"
+    assert provider._base_url == "https://ollama.com"
 
 
 def test_doctor_reports_missing_ollama_cloud_key(monkeypatch, tmp_path):

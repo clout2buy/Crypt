@@ -177,7 +177,7 @@ def model_default(provider: str, saved: dict | None = None) -> str:
         return explicit
     value = saved.get("ollama_model") or OLLAMA_MODEL
     host = ollama_host(saved=saved)
-    if is_local_host(host) and is_ollama_cloud_model(str(value)):
+    if is_local_host(host) and is_ollama_cloud_model(str(value)) and not os.getenv("OLLAMA_API_KEY"):
         return OLLAMA_MODEL
     return value
 
@@ -200,6 +200,8 @@ def ollama_host(cli_host: str | None = None, saved: dict | None = None) -> str:
         host = client_host(str(saved_host))
         if not (is_ollama_cloud_host(host) and not os.getenv("OLLAMA_API_KEY")):
             return host
+    if os.getenv("OLLAMA_API_KEY"):
+        return "https://ollama.com"
     return OLLAMA_HOST
 
 
@@ -223,10 +225,10 @@ def ollama_models_for_host(host: str) -> tuple[str, ...]:
     return OLLAMA_CLOUD_MODELS if is_ollama_cloud_host(host) else OLLAMA_LOCAL_MODELS
 
 
-def compatible_ollama_model(model: str, host: str) -> str:
-    if is_local_host(host) and is_ollama_cloud_model(model):
-        return OLLAMA_MODEL
-    return model
+def ollama_host_for_model(model: str, host: str | None = None) -> str:
+    if is_ollama_cloud_model(model):
+        return "https://ollama.com"
+    return client_host(host or OLLAMA_HOST)
 
 
 def client_host(host: str) -> str:
