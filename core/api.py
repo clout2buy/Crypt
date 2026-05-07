@@ -56,6 +56,7 @@ class ToolUseProgress:
 class ToolUseReady:
     message: dict
     usage: dict | None = None
+    tool: dict | None = None
 
 
 @dataclass
@@ -64,6 +65,7 @@ class TurnEnd:
     message: dict
     usage: dict | None = None
     text_buffered: bool = False
+    tool_results: list[dict] | None = None
 
 
 Event = TextDelta | ThinkingDelta | ToolUseProgress | ToolUseReady | TurnEnd
@@ -331,9 +333,15 @@ def _process_event(event_type, data, content_blocks, usage):
             except json.JSONDecodeError:
                 parsed = {}
             block["input"] = parsed if isinstance(parsed, dict) else {}
+            clean = {
+                key: value
+                for key, value in block.items()
+                if not key.startswith("_")
+            }
             yield ToolUseReady(
                 message=_finalized_assistant_message(content_blocks),
                 usage=usage,
+                tool=clean,
             )
         return
 

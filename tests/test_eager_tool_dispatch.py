@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 from core import loop, runtime
 import pytest
 
@@ -197,6 +200,239 @@ def test_multi_tool_assistant_message_uses_parallel_dispatch(monkeypatch):
 
     assert calls == [["call_1", "call_2"]]
     assert [b["tool_use_id"] for b in messages[-1]["content"]] == ["call_1", "call_2"]
+
+
+def test_streaming_tool_executor_starts_tool_before_message_stop(monkeypatch, workspace):
+    started = threading.Event()
+    provider_saw_started: list[bool] = []
+    calls: list[str] = []
+
+    def run(args):
+        calls.append(args["x"])
+        started.set()
+        time.sleep(0.05)
+        return "streamed ok"
+
+    tool = Tool(
+        name="stream_stub",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=run,
+        classify=lambda args: "safe",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def stream_turn(self, messages, tools, system):
+            block = {
+                "type": "tool_use",
+                "id": "call_stream",
+                "name": "stream_stub",
+                "input": {"x": "now"},
+            }
+            message = {"role": "assistant", "content": [block]}
+            yield ToolUseReady(message=message, tool=block)
+            provider_saw_started.append(started.wait(1))
+            yield TurnEnd(stop_reason="tool_use", message=message)
+
+    runtime.configure(Provider(), str(workspace), session=None)
+
+    end = loop._stream_one_turn(
+        Provider(),
+        messages=[{"role": "user", "content": "use tool"}],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=False,
+    )
+
+    assert provider_saw_started == [True]
+    assert calls == ["now"]
+    assert end.tool_results == [{
+        "type": "tool_result",
+        "tool_use_id": "call_stream",
+        "content": "streamed ok",
+        "is_error": False,
+    }]
+
+
+def test_streaming_tool_completion_is_drained_during_provider_stream(monkeypatch, workspace):
+    finished = threading.Event()
+    visible_end = threading.Event()
+    provider_saw_visible_end: list[bool] = []
+
+    def run(args):
+        finished.set()
+        return "streamed ok"
+
+    tool = Tool(
+        name="stream_drain",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=run,
+        classify=lambda args: "safe",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+    monkeypatch.setattr(loop.ui, "activity", lambda label: None)
+    monkeypatch.setattr(loop.ui, "stream_delta", lambda kind, text: None)
+    monkeypatch.setattr(loop.ui, "stream_clear", lambda: None)
+    monkeypatch.setattr(loop.ui, "tool_progress_clear", lambda: None)
+    monkeypatch.setattr(loop.ui, "tool_begin", lambda tool_id, name, summary: None)
+    monkeypatch.setattr(loop.ui, "tool_set_state", lambda tool_id, state, detail="": None)
+    monkeypatch.setattr(loop.ui, "tool_end", lambda tool_id, ok, output="": visible_end.set())
+    monkeypatch.setattr(loop.ui, "assistant_start", lambda: None)
+    monkeypatch.setattr(loop.ui, "assistant_chunk", lambda text: None)
+    monkeypatch.setattr(loop.ui, "assistant_end", lambda: None)
+
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = True
+
+        def stream_turn(self, messages, tools, system):
+            block = {
+                "type": "tool_use",
+                "id": "call_drain",
+                "name": "stream_drain",
+                "input": {"x": "now"},
+            }
+            message = {"role": "assistant", "content": [block]}
+            yield ToolUseReady(message=message, tool=block)
+            assert finished.wait(1)
+            yield TextDelta("still streaming")
+            provider_saw_visible_end.append(visible_end.is_set())
+            yield TurnEnd(stop_reason="tool_use", message=message)
+
+    runtime.configure(Provider(), str(workspace), session=None)
+
+    loop._stream_one_turn(
+        Provider(),
+        messages=[{"role": "user", "content": "use tool"}],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=True,
+    )
+
+    assert provider_saw_visible_end == [True]
+
+
+def test_run_until_done_uses_streamed_tool_result_once(monkeypatch, workspace):
+    calls: list[str] = []
+
+    def run(args):
+        calls.append(args["x"])
+        return "streamed ok"
+
+    tool = Tool(
+        name="stream_once",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=run,
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def __init__(self):
+            self.turns = 0
+
+        def stream_turn(self, messages, tools, system):
+            self.turns += 1
+            if self.turns == 1:
+                block = {
+                    "type": "tool_use",
+                    "id": "call_once",
+                    "name": "stream_once",
+                    "input": {"x": "once"},
+                }
+                message = {"role": "assistant", "content": [block]}
+                yield ToolUseReady(message=message, tool=block)
+                yield TurnEnd(stop_reason="tool_use", message=message)
+                return
+            assert any(
+                block.get("tool_use_id") == "call_once"
+                for msg in messages
+                for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+                if isinstance(block, dict)
+            )
+            yield TurnEnd(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            )
+
+    provider = Provider()
+    runtime.configure(provider, str(workspace), session=None)
+    messages = [{"role": "user", "content": "use tool once"}]
+
+    loop._run_until_done(provider, messages, 0, 0, render=False)
+
+    assert provider.turns == 2
+    assert calls == ["once"]
+    assert sum(
+        1
+        for msg in messages
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        if isinstance(block, dict) and block.get("tool_use_id") == "call_once"
+    ) == 1
+
+
+def test_streaming_tool_executor_keeps_foreground_tools_until_turn_end(monkeypatch, workspace):
+    started = threading.Event()
+    provider_saw_started: list[bool] = []
+
+    tool = Tool(
+        name="ask_user",
+        description="stub",
+        schema={"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]},
+        permission="auto",
+        run=lambda args: started.set() or "answered",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def stream_turn(self, messages, tools, system):
+            block = {
+                "type": "tool_use",
+                "id": "call_ask",
+                "name": "ask_user",
+                "input": {"question": "Continue?"},
+            }
+            message = {"role": "assistant", "content": [block]}
+            yield ToolUseReady(message=message, tool=block)
+            provider_saw_started.append(started.is_set())
+            yield TurnEnd(stop_reason="tool_use", message=message)
+
+    runtime.configure(Provider(), str(workspace), session=None)
+
+    end = loop._stream_one_turn(
+        Provider(),
+        messages=[{"role": "user", "content": "ask me"}],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=False,
+    )
+
+    assert provider_saw_started == [False]
+    assert started.is_set()
+    assert end.tool_results == [{
+        "type": "tool_result",
+        "tool_use_id": "call_ask",
+        "content": "answered",
+        "is_error": False,
+    }]
 
 
 def test_anthropic_json_delta_emits_tool_progress():

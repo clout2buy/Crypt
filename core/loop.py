@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
 from . import artifacts, background, compact, doctor, file_state, memory, prompt as prompt_builder, runtime
@@ -369,13 +369,21 @@ def _run_until_done(
                     )
                 return current_tokens, session_tokens
 
-            _dispatch_tool_uses(
-                provider,
-                end.message,
-                messages,
-                record=not is_subagent,
-                render=render,
-            )
+            precomputed_results = getattr(end, "tool_results", None)
+            if precomputed_results is not None:
+                _append_tool_results(
+                    precomputed_results,
+                    messages,
+                    record=not is_subagent,
+                )
+            else:
+                _dispatch_tool_uses(
+                    provider,
+                    end.message,
+                    messages,
+                    record=not is_subagent,
+                    render=render,
+                )
             _ensure_tool_result_pairing(messages)
 
             # Micro-compaction: once context is half full, replace stale
@@ -450,6 +458,7 @@ def _stream_one_turn(
     text_open = False
     buffer_artifact_text = render and artifacts.creation_requested(messages)
     buffered_text: list[str] = []
+    streaming_tools = _StreamingToolExecutor(render=render)
     if render:
         if buffer_artifact_text:
             ui.activity("waiting for file tool call")
@@ -464,6 +473,7 @@ def _stream_one_turn(
             tool_guidance=REGISTRY.prompts(),
         )
         for event in provider.stream_turn(messages, tools, system_prompt):
+            streaming_tools.poll()
             if isinstance(event, ThinkingDelta):
                 if thinking_started_at is None:
                     thinking_started_at = time.monotonic()
@@ -531,6 +541,8 @@ def _stream_one_turn(
                     text_open = True
                 ui.assistant_chunk(event.text)
             elif isinstance(event, ToolUseReady):
+                if event.tool:
+                    streaming_tools.add(event.tool)
                 if render:
                     ui.activity("tool call ready")
                     ui.stream_clear()
@@ -541,12 +553,9 @@ def _stream_one_turn(
                 if text_open:
                     ui.assistant_end()
                     text_open = False
-                return TurnEnd(
-                    stop_reason="tool_use",
-                    message=event.message,
-                    usage=event.usage,
-                )
             elif isinstance(event, TurnEnd):
+                for block in _tool_blocks(event.message):
+                    streaming_tools.add(block)
                 if render:
                     ui.activity("response complete")
                     ui.stream_clear()
@@ -557,11 +566,14 @@ def _stream_one_turn(
                     ui.assistant_end()
                 if buffered_text and _extract_text(event.message):
                     event.text_buffered = True
+                if _has_tool_use(event.message):
+                    event.tool_results = streaming_tools.finish()
                 return event
 
         raise RuntimeError("provider stream ended without a TurnEnd event")
 
     except BaseException:
+        streaming_tools.cancel()
         if render:
             ui.stream_clear()
             ui.tool_progress_clear()
@@ -633,6 +645,211 @@ def _dispatch_tool_uses(
     messages.append(result_msg)
     if record and runtime.session():
         runtime.session().record_message(result_msg)
+
+
+def _append_tool_results(
+    results: list[dict],
+    messages: list[dict],
+    *,
+    record: bool,
+) -> None:
+    if not results:
+        raise RuntimeError("assistant stopped for tool_use without tool_use blocks")
+    result_msg = {"role": "user", "content": results}
+    messages.append(result_msg)
+    if record and runtime.session():
+        runtime.session().record_message(result_msg)
+
+
+@dataclass
+class _RunningTool:
+    block: dict
+    future: Future
+    parallel_safe: bool
+
+
+class _StreamingToolExecutor:
+    """Claude-style streamed tool executor.
+
+    Tool input still has to finish streaming before execution can begin, but
+    once a tool block closes we can start safe/auto-approved tools while the
+    provider continues sending later blocks and message_stop.
+    """
+
+    def __init__(self, *, render: bool) -> None:
+        self._render = render
+        self._queue: list[dict] = []
+        self._order: list[dict] = []
+        self._running: dict[str, _RunningTool] = {}
+        self._results: dict[str, dict] = {}
+        self._seen: set[str] = set()
+        self._pool: ThreadPoolExecutor | None = None
+        self._aborted = False
+
+    def add(self, block: dict) -> None:
+        tool_id = str(block.get("id") or "")
+        if not tool_id or tool_id in self._seen:
+            return
+        self._seen.add(tool_id)
+        self._order.append(block)
+        self._queue.append(block)
+        self._pump()
+
+    def finish(self) -> list[dict]:
+        while self._queue or self._running:
+            self._pump()
+            if self._queue and not self._running:
+                block = self._queue.pop(0)
+                if self._aborted:
+                    self._results[str(block.get("id") or "")] = _skipped_tool_result(block)
+                    continue
+                ok, output = _dispatch_one(block, render=self._render)
+                self._results[str(block.get("id") or "")] = _tool_result_block(block, ok, output)
+                if _should_abort_tool_batch(ok, output):
+                    self._aborted = True
+                continue
+            self._complete_finished(wait_for_one=True)
+        self._shutdown()
+        return [self._results[str(block.get("id") or "")] for block in self._order]
+
+    def cancel(self) -> None:
+        for running in self._running.values():
+            running.future.cancel()
+        self._queue.clear()
+        self._shutdown(wait_for_running=False)
+
+    def poll(self) -> None:
+        self._complete_finished(wait_for_one=False)
+        self._pump()
+
+    def _pump(self) -> None:
+        self._complete_finished(wait_for_one=False)
+        while self._queue and not self._aborted:
+            block = self._queue[0]
+            if not self._can_stream_dispatch(block):
+                return
+            parallel_safe = _tool_parallel_safe(block)
+            if not self._can_start(parallel_safe):
+                return
+            self._queue.pop(0)
+            self._start(block, parallel_safe)
+
+    def _start(self, block: dict, parallel_safe: bool) -> None:
+        tool_id = str(block.get("id") or "")
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=8)
+        if self._render:
+            ui.tool_progress_clear()
+            ui.tool_begin(tool_id, str(block.get("name") or "tool"), _tool_summary(block))
+            ui.tool_set_state(tool_id, "running")
+        future = self._pool.submit(_dispatch_one, block, render=False)
+        self._running[tool_id] = _RunningTool(block=block, future=future, parallel_safe=parallel_safe)
+
+    def _complete_finished(self, *, wait_for_one: bool) -> None:
+        if wait_for_one and self._running and not any(item.future.done() for item in self._running.values()):
+            wait([item.future for item in self._running.values()], return_when=FIRST_COMPLETED)
+        finished = [
+            tool_id
+            for tool_id, item in self._running.items()
+            if item.future.done()
+        ]
+        for tool_id in finished:
+            item = self._running.pop(tool_id)
+            try:
+                ok, output = item.future.result()
+            except Exception as exc:
+                ok, output = False, f"{type(exc).__name__}: {exc}"
+            self._results[tool_id] = _tool_result_block(item.block, ok, output)
+            if self._render:
+                ui.tool_end(tool_id, ok=ok, output=str(output))
+            if _should_abort_tool_batch(ok, str(output)):
+                self._aborted = True
+
+    def _can_start(self, parallel_safe: bool) -> bool:
+        if not self._running:
+            return True
+        return parallel_safe and all(item.parallel_safe for item in self._running.values())
+
+    def _can_stream_dispatch(self, block: dict) -> bool:
+        tool = REGISTRY.get(str(block.get("name") or ""))
+        if tool is None or tool.quiet:
+            return False
+        if tool.name in _FOREGROUND_ONLY_TOOLS:
+            return False
+        args = block.get("input") or {}
+        if not isinstance(args, dict):
+            return False
+        try:
+            classification = tool.classify(args) if tool.classify else None
+        except Exception:
+            classification = None
+        if classification == "danger":
+            return False
+        if classification == "safe":
+            return True
+        if runtime.can_auto_approve(tool.name):
+            return True
+        return tool.name in _STREAM_AUTO_TOOLS
+
+    def _shutdown(self, *, wait_for_running: bool = True) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=wait_for_running, cancel_futures=not wait_for_running)
+            self._pool = None
+
+
+def _tool_blocks(message: dict) -> list[dict]:
+    return [
+        block
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+
+
+_STREAM_AUTO_TOOLS = {
+    "bash_poll",
+    "git",
+    "glob",
+    "grep",
+    "list_files",
+    "read_file",
+    "read_media",
+}
+
+
+_FOREGROUND_ONLY_TOOLS = {
+    "ask_user",
+    "present_plan",
+    "set_workspace",
+    "spawn_agent",
+}
+
+
+def _tool_summary(block: dict) -> str:
+    tool = REGISTRY.get(str(block.get("name") or ""))
+    args = block.get("input") if isinstance(block.get("input"), dict) else {}
+    if tool and tool.summary:
+        try:
+            return tool.summary(args)
+        except Exception:
+            pass
+    return json.dumps(args, ensure_ascii=False)[:120] if args else ""
+
+
+def _tool_parallel_safe(block: dict) -> bool:
+    tool = REGISTRY.get(str(block.get("name") or ""))
+    return bool(tool and tool.parallel_safe)
+
+
+def _skipped_tool_result(block: dict) -> dict:
+    return {
+        "type": "tool_result",
+        "tool_use_id": block["id"],
+        "content": (
+            "skipped: previous tool failed or was denied. "
+            "Read the failure/feedback and choose the next step."
+        ),
+        "is_error": True,
+    }
 
 
 def _tool_progress_detail(event: ToolUseProgress) -> str:
