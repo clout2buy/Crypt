@@ -240,7 +240,7 @@ def test_status_hides_abort_hint_once_chunks_arrive(monkeypatch):
         ui._state["stream_chars"] = 0
 
 
-def test_artifact_hidden_thinking_does_not_surface_internal_stream(monkeypatch, workspace):
+def test_artifact_hidden_thinking_surfaces_collapsed_liveness(monkeypatch, workspace):
     from core import loop, runtime
     from core.api import ThinkingDelta, TurnEnd
 
@@ -258,21 +258,40 @@ def test_artifact_hidden_thinking_does_not_surface_internal_stream(monkeypatch, 
 
     runtime.configure(Provider(), str(workspace), session=None)
     runtime.set_show_thinking(False)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        loop.ui,
+        "stream_delta",
+        lambda kind, text, activity=None: seen.append((kind, text, activity or "")),
+    )
+    monkeypatch.setattr(loop.ui, "stream_clear", lambda: None)
+    monkeypatch.setattr(loop.ui, "tool_progress_clear", lambda: None)
+
+    loop._stream_one_turn(
+        Provider(),
+        messages=[{"role": "user", "content": "make an interactive html"}],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=True,
+    )
+
+    assert seen == [("thinking", "private planning", "planning file tool call")]
+
+
+def test_stream_delta_can_preserve_activity_label():
     ui._state["stream_kind"] = ""
     ui._state["stream_chars"] = 0
+    ui._state["activity"] = "idle"
     try:
-        loop._stream_one_turn(
-            Provider(),
-            messages=[{"role": "user", "content": "make an interactive html"}],
-            tools=[],
-            loader=loop._SilentLoader(),
-            render=True,
-        )
-        assert ui._state["stream_kind"] == ""
-        assert ui._state["stream_chars"] == 0
+        ui.stream_delta("thinking", "abc", activity="planning file tool call")
+
+        assert ui._state["stream_kind"] == "thinking"
+        assert ui._state["stream_chars"] == 3
+        assert ui._state["activity"] == "planning file tool call"
     finally:
         ui._state["stream_kind"] = ""
         ui._state["stream_chars"] = 0
+        ui._state["activity"] = "idle"
 
 
 def test_tool_progress_renders_detail():

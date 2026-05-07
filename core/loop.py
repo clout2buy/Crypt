@@ -14,6 +14,10 @@ from .api import Provider, TextDelta, ThinkingDelta, ToolUseProgress, ToolUseRea
 from tools import REGISTRY, dispatch
 
 
+class ReasoningStallError(RuntimeError):
+    """Raised when hidden reasoning makes no visible progress for too long."""
+
+
 _BASE_SYSTEM = """You are Crypt, a local-first software engineering agent.
 
 Work like a careful engineer:
@@ -286,7 +290,8 @@ def _run_until_done(
         # budget before giving up. Mirrors Claude Code's
         # max_output_tokens_escalate transition (query.ts:1199-1221).
         escalated_this_turn = False
-        artifact_tool_retry_used = False
+        artifact_text_retry_used = False
+        artifact_stall_retry_used = False
         while used < budget:
             _ensure_tool_result_pairing(messages)
             tracing.emit(
@@ -296,7 +301,23 @@ def _run_until_done(
                 tool_count=len(tools),
                 subagent=is_subagent,
             )
-            end = _stream_with_retry(provider, messages, tools, loader, render=render)
+            try:
+                end = _stream_with_retry(provider, messages, tools, loader, render=render)
+            except ReasoningStallError:
+                if (
+                    not is_subagent
+                    and not artifact_stall_retry_used
+                    and artifacts.creation_requested(messages)
+                ):
+                    artifact_stall_retry_used = True
+                    correction = artifacts.reasoning_stall_retry_message(messages)
+                    messages.append(correction)
+                    if runtime.session():
+                        runtime.session().append({"type": "message", "message": correction})
+                    if render:
+                        ui.info("model stalled in hidden reasoning; retrying with immediate file-tool instruction")
+                    continue
+                raise
             tracing.emit(
                 "model_turn_end",
                 turn=used + 1,
@@ -321,10 +342,10 @@ def _run_until_done(
             if not _has_tool_use(end.message):
                 if (
                     not is_subagent
-                    and not artifact_tool_retry_used
+                    and not artifact_text_retry_used
                     and artifacts.should_retry_text_only(messages, end.message)
                 ):
-                    artifact_tool_retry_used = True
+                    artifact_text_retry_used = True
                     correction = artifacts.tool_retry_message(messages)
                     messages.append(correction)
                     if runtime.session():
@@ -478,8 +499,12 @@ def _stream_one_turn(
                 if thinking_started_at is None:
                     thinking_started_at = time.monotonic()
                 thinking_chars += len(event.text or "")
-                if _reasoning_stalled(thinking_started_at, thinking_chars):
-                    raise RuntimeError(
+                if _reasoning_stalled(
+                    thinking_started_at,
+                    thinking_chars,
+                    artifact=buffer_artifact_text,
+                ):
+                    raise ReasoningStallError(
                         "provider spent too long in reasoning without producing text or tool calls. "
                         "Retry with thinking disabled, a faster model, or a smaller request."
                     )
@@ -489,9 +514,17 @@ def _stream_one_turn(
                         ui.stream_delta("reasoning", event.text)
                     else:
                         if buffer_artifact_text:
-                            ui.activity("planning file tool call")
+                            ui.stream_delta(
+                                "thinking",
+                                event.text,
+                                activity="planning file tool call",
+                            )
                         else:
-                            ui.activity("model planning before next action")
+                            ui.stream_delta(
+                                "thinking",
+                                event.text,
+                                activity="model planning before next action",
+                            )
                 if not show_thinking:
                     continue
                 if not thinking_open:
@@ -1077,16 +1110,27 @@ def _stream_with_retry(
     raise last_err  # pragma: no cover (unreachable)
 
 
-def _reasoning_stalled(started_at: float, chars: int) -> bool:
+def _reasoning_stalled(started_at: float, chars: int, *, artifact: bool = False) -> bool:
     if runtime.show_thinking():
         return False
-    try:
-        seconds = int(os.getenv("CRYPT_REASONING_STALL_SECONDS", "45"))
-    except ValueError:
-        seconds = 45
+    seconds = _reasoning_stall_seconds(artifact=artifact)
     if seconds <= 0:
         return False
     return chars > 0 and (time.monotonic() - started_at) >= seconds
+
+
+def _reasoning_stall_seconds(*, artifact: bool) -> int:
+    base = _env_int("CRYPT_REASONING_STALL_SECONDS", 90)
+    if not artifact:
+        return base
+    return _env_int("CRYPT_ARTIFACT_REASONING_STALL_SECONDS", max(base, 120))
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 def _has_tool_use(msg: dict) -> bool:

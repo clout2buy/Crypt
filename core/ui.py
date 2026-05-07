@@ -1193,13 +1193,13 @@ def activity(label: str) -> None:
         live.update(_LiveRenderable(), refresh=True)
 
 
-def stream_delta(kind: str, text: str) -> None:
+def stream_delta(kind: str, text: str, *, activity: str | None = None) -> None:
     kind = str(kind or "stream")
     if _state.get("stream_kind") != kind:
         _state["stream_kind"] = kind
         _state["stream_chars"] = 0
     _state["stream_chars"] = int(_state.get("stream_chars") or 0) + len(text or "")
-    _state["activity"] = f"receiving {kind} stream"
+    _state["activity"] = str(activity or f"receiving {kind} stream")
     live = _state["live"]
     if live is not None and _state.get("tool_progress") is None:
         live.update(_LiveRenderable(), refresh=True)

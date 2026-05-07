@@ -513,6 +513,7 @@ def test_hidden_reasoning_stall_aborts(monkeypatch, workspace):
 
     times = iter([0.0, 0.0, 46.0])
     monkeypatch.setenv("CRYPT_REASONING_STALL_SECONDS", "45")
+    monkeypatch.setenv("CRYPT_ARTIFACT_REASONING_STALL_SECONDS", "45")
     monkeypatch.setattr(loop.time, "monotonic", lambda: next(times))
     runtime.configure(SlowThinkingProvider(), str(workspace), session=None)
     runtime.set_show_thinking(False)
@@ -525,6 +526,76 @@ def test_hidden_reasoning_stall_aborts(monkeypatch, workspace):
             loader=loop._SilentLoader(),
             render=True,
         )
+
+
+def test_artifact_reasoning_stall_retries_with_tool_instruction(monkeypatch, workspace):
+    class StallThenToolProvider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.seen_messages: list[list[dict]] = []
+
+        def stream_turn(self, messages, tools, system):
+            self.calls += 1
+            self.seen_messages.append(list(messages))
+            if self.calls == 1:
+                yield ThinkingDelta("still thinking")
+                yield ThinkingDelta("still thinking")
+                return
+            if self.calls == 2:
+                assert any(
+                    "spent too long in hidden reasoning" in block.get("text", "")
+                    for msg in messages
+                    for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+                    if isinstance(block, dict)
+                )
+                yield TurnEnd(
+                    stop_reason="tool_use",
+                    message={
+                        "role": "assistant",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "stub",
+                            "input": {"x": "ok"},
+                        }],
+                    },
+                )
+                return
+            yield TurnEnd(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            )
+
+    times = iter([0.0, 0.0, 46.0])
+    monkeypatch.setenv("CRYPT_REASONING_STALL_SECONDS", "45")
+    monkeypatch.setenv("CRYPT_ARTIFACT_REASONING_STALL_SECONDS", "45")
+    monkeypatch.setattr(loop.time, "monotonic", lambda: next(times))
+    provider = StallThenToolProvider()
+    runtime.configure(provider, str(workspace), session=None)
+    runtime.set_show_thinking(False)
+    tool = Tool(
+        name="stub",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=lambda args: f"ran {args['x']}",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+    messages = [{"role": "user", "content": "create a 3d dna html and open it"}]
+
+    loop._run_until_done(provider, messages, 0, 0, render=False)
+
+    assert provider.calls == 3
+    assert any(
+        block.get("type") == "tool_result" and "ran ok" in block.get("content", "")
+        for msg in messages
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        if isinstance(block, dict)
+    )
 
 
 class _TextThenToolProvider:

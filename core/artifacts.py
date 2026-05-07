@@ -77,6 +77,28 @@ def tool_retry_message(messages: list[dict]) -> dict:
     }
 
 
+def reasoning_stall_retry_message(messages: list[dict]) -> dict:
+    request = _last_textual_user_message(messages)
+    wants_open = bool(re.search(r"\b(open|launch|show)\b", request, re.I))
+    open_instruction = (
+        " After write_file succeeds, call open_file for the generated file."
+        if wants_open
+        else ""
+    )
+    return {
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": (
+                "Crypt harness correction: your previous attempt spent too long in hidden reasoning "
+                "without emitting text or a tool call. Stop planning internally. Your next response must "
+                "immediately call write_file with a sensible filename and the full artifact content for "
+                f"the user's request: {request!r}.{open_instruction} Keep narration minimal."
+            ),
+        }],
+    }
+
+
 def looks_like_artifact_start(text: str) -> bool:
     if not text:
         return False
