@@ -825,7 +825,6 @@ class OpenAICodexProvider:
             "include": ["reasoning.encrypted_content"],
             "tool_choice": "auto",
             "parallel_tool_calls": True,
-            "max_output_tokens": self._max_tokens,
         }
         effort = os.getenv("OPENAI_CODEX_REASONING_EFFORT")
         if effort:

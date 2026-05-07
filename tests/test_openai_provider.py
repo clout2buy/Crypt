@@ -121,6 +121,9 @@ def test_openai_codex_uses_chatgpt_backend_headers_and_responses_body():
     assert call["headers"]["ChatGPT-Account-ID"] == "account-123"
     assert call["headers"]["OpenAI-Beta"] == "responses=experimental"
     assert call["json"]["instructions"] == "sys"
+    assert "max_output_tokens" not in call["json"]
+    assert "max_tokens" not in call["json"]
+    assert "max_completion_tokens" not in call["json"]
     assert call["json"]["input"] == [{
         "role": "user",
         "content": [{"type": "input_text", "text": "hello"}],
