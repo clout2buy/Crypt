@@ -32,7 +32,7 @@ def main() -> int:
     p.add_argument("--cwd", help="workspace root for tools")
     p.add_argument("--max-tokens", type=int, help="Anthropic response token cap")
     p.add_argument("--thinking-budget", type=int, help="Anthropic thinking token budget")
-    p.add_argument("--ollama-host", help="Ollama host, usually https://ollama.com")
+    p.add_argument("--ollama-host", help="Ollama host, usually http://localhost:11434")
     p.add_argument(
         "--show-thinking",
         action=argparse.BooleanOptionalAction,

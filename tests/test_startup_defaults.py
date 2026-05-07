@@ -94,17 +94,15 @@ def test_ollama_auth_label_distinguishes_cloud_and_local(monkeypatch):
     assert local == "local Ollama"
 
 
-def test_ollama_auth_label_uses_runtime_cloud_route(monkeypatch):
+def test_ollama_auth_label_uses_runtime_local_transport_for_cloud_model(monkeypatch):
     _clear_provider_env(monkeypatch)
 
     provider = main._provider(_args(model="ministral-3:14b-cloud"), {}, settings.PROVIDER_OLLAMA)
 
-    assert main._provider_auth_label(settings.PROVIDER_OLLAMA, _args(), {}, None, provider=provider) == (
-        "missing OLLAMA_API_KEY"
-    )
+    assert main._provider_auth_label(settings.PROVIDER_OLLAMA, _args(), {}, None, provider=provider) == "local Ollama"
 
 
-def test_saved_cloud_ollama_without_key_falls_back_to_local(monkeypatch):
+def test_saved_cloud_ollama_without_key_uses_local_ollama_transport(monkeypatch):
     _clear_provider_env(monkeypatch)
     saved = {
         "provider": settings.PROVIDER_OLLAMA,
@@ -113,7 +111,7 @@ def test_saved_cloud_ollama_without_key_falls_back_to_local(monkeypatch):
     }
 
     assert settings.ollama_host(saved=saved) == "http://localhost:11434"
-    assert settings.model_default(settings.PROVIDER_OLLAMA, saved) == "gpt-oss:20b"
+    assert settings.model_default(settings.PROVIDER_OLLAMA, saved) == "glm-5.1:cloud"
 
 
 def test_saved_cloud_ollama_with_key_stays_cloud(monkeypatch):
@@ -155,8 +153,8 @@ def test_ollama_picker_offers_local_and_cloud_models(monkeypatch):
     assert "kimi-k2:latest" not in seen
 
 
-def test_cloud_model_routes_to_cloud_host():
-    assert settings.ollama_host_for_model("glm-5.1:cloud", "http://localhost:11434") == "https://ollama.com"
+def test_cloud_model_uses_configured_ollama_transport():
+    assert settings.ollama_host_for_model("glm-5.1:cloud", "http://localhost:11434") == "http://localhost:11434"
     assert settings.ollama_host_for_model("gpt-oss:20b", "https://ollama.com") == "https://ollama.com"
 
 
@@ -170,13 +168,13 @@ def test_ollama_provider_does_not_think_unless_thinking_is_shown(monkeypatch):
     assert shown_provider._think is True
 
 
-def test_provider_routes_cloud_model_to_cloud_host(monkeypatch):
+def test_provider_keeps_cloud_model_on_local_ollama_transport(monkeypatch):
     _clear_provider_env(monkeypatch)
 
     provider = main._provider(_args(model="glm-5.1:cloud"), {}, settings.PROVIDER_OLLAMA)
 
     assert provider.model == "glm-5.1:cloud"
-    assert provider._base_url == "https://ollama.com"
+    assert provider._base_url == "http://localhost:11434"
 
 
 def test_runtime_choice_saves_cloud_host_for_cloud_model(monkeypatch, tmp_path):
@@ -193,7 +191,7 @@ def test_runtime_choice_saves_cloud_host_for_cloud_model(monkeypatch, tmp_path):
 
     saved = settings.load_config()
     assert saved["ollama_model"] == "ministral-3:14b-cloud"
-    assert saved["ollama_host"] == "https://ollama.com"
+    assert saved["ollama_host"] == "http://localhost:11434"
 
 
 def test_doctor_reports_missing_ollama_cloud_key(monkeypatch, tmp_path):
