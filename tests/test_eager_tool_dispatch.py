@@ -321,6 +321,97 @@ def test_streaming_tool_completion_is_drained_during_provider_stream(monkeypatch
     assert provider_saw_visible_end == [True]
 
 
+def test_stream_error_after_tool_ready_preserves_tool_result(monkeypatch, workspace):
+    calls: list[str] = []
+
+    def run(args):
+        calls.append(args["x"])
+        return "streamed ok"
+
+    tool = Tool(
+        name="stream_recover",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=run,
+        classify=lambda args: "safe",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def stream_turn(self, messages, tools, system):
+            block = {
+                "type": "tool_use",
+                "id": "call_recover",
+                "name": "stream_recover",
+                "input": {"x": "once"},
+            }
+            message = {"role": "assistant", "content": [block]}
+            yield ToolUseReady(message=message, tool=block)
+            raise TimeoutError("stream dropped")
+
+    runtime.configure(Provider(), str(workspace), session=None)
+
+    end = loop._stream_one_turn(
+        Provider(),
+        messages=[{"role": "user", "content": "use tool"}],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=False,
+    )
+
+    assert end.stop_reason == "tool_use"
+    assert calls == ["once"]
+    assert end.tool_results == [{
+        "type": "tool_result",
+        "tool_use_id": "call_recover",
+        "content": "streamed ok",
+        "is_error": False,
+    }]
+
+
+def test_stream_gap_tracing_records_long_event_gap(monkeypatch, workspace):
+    emitted: list[tuple[str, dict]] = []
+
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def stream_turn(self, messages, tools, system):
+            yield TextDelta("a")
+            yield TextDelta("b")
+            yield TurnEnd(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"type": "text", "text": "ab"}]},
+            )
+
+    times = iter([0.0, 0.1, 35.5, 35.6])
+    monkeypatch.setenv("CRYPT_STREAM_GAP_TRACE_SECONDS", "30")
+    monkeypatch.setattr(loop.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(loop.tracing, "emit", lambda event, **fields: emitted.append((event, fields)))
+    runtime.configure(Provider(), str(workspace), session=None)
+
+    loop._stream_one_turn(
+        Provider(),
+        messages=[{"role": "user", "content": "say ab"}],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=False,
+    )
+
+    assert emitted[0][0] == "stream_first_event"
+    gaps = [fields for event, fields in emitted if event == "stream_gap"]
+    assert len(gaps) == 1
+    assert gaps[0]["gap_seconds"] == 35.4
+    summaries = [fields for event, fields in emitted if event == "stream_gap_summary"]
+    assert summaries == [{"gap_count": 1, "total_gap_seconds": 35.4}]
+
+
 def test_run_until_done_uses_streamed_tool_result_once(monkeypatch, workspace):
     calls: list[str] = []
 
@@ -570,7 +661,7 @@ def test_artifact_reasoning_stall_retries_with_tool_instruction(monkeypatch, wor
                 message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
             )
 
-    times = iter([0.0, 0.0, 46.0])
+    times = iter([0.0, 0.0, 46.0, 47.0, 48.0, 49.0, 50.0])
     monkeypatch.setenv("CRYPT_REASONING_STALL_SECONDS", "45")
     monkeypatch.setenv("CRYPT_ARTIFACT_REASONING_STALL_SECONDS", "45")
     monkeypatch.setattr(loop.time, "monotonic", lambda: next(times))

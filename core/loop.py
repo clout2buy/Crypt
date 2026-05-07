@@ -480,6 +480,12 @@ def _stream_one_turn(
     buffer_artifact_text = render and artifacts.creation_requested(messages)
     buffered_text: list[str] = []
     streaming_tools = _StreamingToolExecutor(render=render)
+    latest_tool_message: dict | None = None
+    stream_started_at = time.monotonic()
+    last_event_at: float | None = None
+    stream_gap_seconds = _stream_gap_trace_seconds()
+    stream_gap_count = 0
+    stream_gap_total = 0.0
     if render:
         if buffer_artifact_text:
             ui.activity("waiting for file tool call")
@@ -494,15 +500,36 @@ def _stream_one_turn(
             tool_guidance=REGISTRY.prompts(),
         )
         for event in provider.stream_turn(messages, tools, system_prompt):
+            event_at = time.monotonic()
+            if last_event_at is None:
+                tracing.emit(
+                    "stream_first_event",
+                    ttft_seconds=round(event_at - stream_started_at, 3),
+                    event_type=type(event).__name__,
+                )
+            else:
+                gap = event_at - last_event_at
+                if stream_gap_seconds > 0 and gap >= stream_gap_seconds:
+                    stream_gap_count += 1
+                    stream_gap_total += gap
+                    tracing.emit(
+                        "stream_gap",
+                        gap_seconds=round(gap, 3),
+                        gap_count=stream_gap_count,
+                        total_gap_seconds=round(stream_gap_total, 3),
+                        event_type=type(event).__name__,
+                    )
+            last_event_at = event_at
             streaming_tools.poll()
             if isinstance(event, ThinkingDelta):
                 if thinking_started_at is None:
-                    thinking_started_at = time.monotonic()
+                    thinking_started_at = event_at
                 thinking_chars += len(event.text or "")
                 if _reasoning_stalled(
                     thinking_started_at,
                     thinking_chars,
                     artifact=buffer_artifact_text,
+                    now=event_at,
                 ):
                     raise ReasoningStallError(
                         "provider spent too long in reasoning without producing text or tool calls. "
@@ -574,6 +601,8 @@ def _stream_one_turn(
                     text_open = True
                 ui.assistant_chunk(event.text)
             elif isinstance(event, ToolUseReady):
+                if _has_tool_use(event.message):
+                    latest_tool_message = event.message
                 if event.tool:
                     streaming_tools.add(event.tool)
                 if render:
@@ -601,11 +630,55 @@ def _stream_one_turn(
                     event.text_buffered = True
                 if _has_tool_use(event.message):
                     event.tool_results = streaming_tools.finish()
+                _emit_stream_gap_summary(stream_gap_count, stream_gap_total)
                 return event
 
+        _emit_stream_gap_summary(stream_gap_count, stream_gap_total)
         raise RuntimeError("provider stream ended without a TurnEnd event")
 
+    except Exception as exc:
+        if latest_tool_message and _has_tool_use(latest_tool_message):
+            if render:
+                ui.activity("stream ended after tool call")
+                ui.stream_clear()
+                ui.tool_progress_clear()
+            if thinking_open:
+                ui.thinking_end()
+                thinking_open = False
+            if text_open:
+                ui.assistant_end()
+                text_open = False
+            if render:
+                ui.info(
+                    "provider stream ended after a tool call; "
+                    "continuing with paired tool result"
+                )
+            recovered = TurnEnd(
+                stop_reason="tool_use",
+                message=latest_tool_message,
+                usage=None,
+            )
+            recovered.tool_results = streaming_tools.finish()
+            tracing.emit(
+                "stream_recovered_after_tool_use",
+                error=f"{type(exc).__name__}: {exc}",
+                tool_uses=_tool_use_names(latest_tool_message),
+            )
+            _emit_stream_gap_summary(stream_gap_count, stream_gap_total)
+            return recovered
+        _emit_stream_gap_summary(stream_gap_count, stream_gap_total)
+        streaming_tools.cancel()
+        if render:
+            ui.stream_clear()
+            ui.tool_progress_clear()
+        if thinking_open:
+            ui.thinking_end()
+        if text_open:
+            ui.assistant_end()
+        raise
+
     except BaseException:
+        _emit_stream_gap_summary(stream_gap_count, stream_gap_total)
         streaming_tools.cancel()
         if render:
             ui.stream_clear()
@@ -1110,13 +1183,20 @@ def _stream_with_retry(
     raise last_err  # pragma: no cover (unreachable)
 
 
-def _reasoning_stalled(started_at: float, chars: int, *, artifact: bool = False) -> bool:
+def _reasoning_stalled(
+    started_at: float,
+    chars: int,
+    *,
+    artifact: bool = False,
+    now: float | None = None,
+) -> bool:
     if runtime.show_thinking():
         return False
     seconds = _reasoning_stall_seconds(artifact=artifact)
     if seconds <= 0:
         return False
-    return chars > 0 and (time.monotonic() - started_at) >= seconds
+    current = time.monotonic() if now is None else now
+    return chars > 0 and (current - started_at) >= seconds
 
 
 def _reasoning_stall_seconds(*, artifact: bool) -> int:
@@ -1131,6 +1211,20 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _stream_gap_trace_seconds() -> int:
+    return _env_int("CRYPT_STREAM_GAP_TRACE_SECONDS", 30)
+
+
+def _emit_stream_gap_summary(count: int, total_seconds: float) -> None:
+    if count <= 0:
+        return
+    tracing.emit(
+        "stream_gap_summary",
+        gap_count=count,
+        total_gap_seconds=round(total_seconds, 3),
+    )
 
 
 def _has_tool_use(msg: dict) -> bool:

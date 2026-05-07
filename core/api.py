@@ -572,6 +572,7 @@ class OpenAIProvider:
                                 name=slot["name"],
                                 call_id=slot.get("id", ""),
                                 argument_chars=len(slot.get("arguments") or ""),
+                                partial_json=slot.get("arguments") or "",
                             )
         content: list[dict] = []
         if text_buf:
