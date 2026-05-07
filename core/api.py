@@ -317,9 +317,24 @@ def _process_event(event_type, data, content_blocks, usage):
         return
 
     if event_type == "content_block_stop":
-        # The content block is complete, but the assistant message may contain
-        # more tool_use blocks after this one. Dispatch happens after TurnEnd so
-        # multi-tool turns stay intact and can use the loop's parallel path.
+        try:
+            index = int(data.get("index", 0))
+        except (TypeError, ValueError):
+            return
+        if index < 0 or index >= len(content_blocks):
+            return
+        block = content_blocks[index]
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            raw = block.get("_partial_json", "")
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            block["input"] = parsed if isinstance(parsed, dict) else {}
+            yield ToolUseReady(
+                message=_finalized_assistant_message(content_blocks),
+                usage=usage,
+            )
         return
 
     if event_type == "message_delta":

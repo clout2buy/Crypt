@@ -89,6 +89,10 @@ local models reach tool calls faster instead of spending minutes in a
 hidden reasoning phase. If a provider still sends reasoning for too long
 without text or tool calls, Crypt aborts that turn after
 `CRYPT_REASONING_STALL_SECONDS` instead of appearing frozen.
+Large generated files stream visibly while the model writes tool args:
+Crypt shows the target path, growing line/character counts, and the latest
+file-content tail. As soon as a complete tool block closes, Crypt dispatches
+it instead of waiting for the provider's final `message_stop`.
 
 Crypt uses the official `anthropic` SDK pointed at Ollama's
 Anthropic-compatible `/v1/messages` endpoint — the same surface Ollama

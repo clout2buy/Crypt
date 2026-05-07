@@ -220,6 +220,7 @@ def _build_tool_progress() -> Text | None:
     chars = int(progress.get("argument_chars") or 0)
     call_id = str(progress.get("call_id") or "")
     detail = str(progress.get("detail") or "")
+    preview = progress.get("preview") or []
     label = f"assembling {name}"
     if chars:
         label += f" args {_fmt_bytes(chars)}"
@@ -233,6 +234,10 @@ def _build_tool_progress() -> Text | None:
         detail_row = Text("\n    ", style=FAINT)
         detail_row.append(_trim(detail, max(12, width - 8)), style=MUTED)
         t.append_text(detail_row)
+    for line in list(preview)[-3:]:
+        preview_row = Text("\n    ", style=FAINT)
+        preview_row.append(_trim(str(line), max(12, width - 8)), style=FAINT)
+        t.append_text(preview_row)
     return t
 
 
@@ -1149,12 +1154,20 @@ def tool_result(ok: bool, output: str = "") -> None:
 
 
 # ─── panels ─────────────────────────────────────────────────────────────
-def tool_progress(name: str, *, argument_chars: int = 0, call_id: str = "", detail: str = "") -> None:
+def tool_progress(
+    name: str,
+    *,
+    argument_chars: int = 0,
+    call_id: str = "",
+    detail: str = "",
+    preview: list[str] | None = None,
+) -> None:
     _state["tool_progress"] = {
         "name": name,
         "argument_chars": max(0, int(argument_chars or 0)),
         "call_id": call_id,
         "detail": detail,
+        "preview": list(preview or []),
     }
     live = _state["live"]
     if live is not None:

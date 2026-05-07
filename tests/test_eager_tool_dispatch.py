@@ -3,7 +3,15 @@ from __future__ import annotations
 from core import loop, runtime
 import pytest
 
-from core.api import ThinkingDelta, TextDelta, ToolUseProgress, TurnEnd, _finalized_assistant_message, _process_event
+from core.api import (
+    ThinkingDelta,
+    TextDelta,
+    ToolUseProgress,
+    ToolUseReady,
+    TurnEnd,
+    _finalized_assistant_message,
+    _process_event,
+)
 from tools import registry
 from tools.types import Tool
 
@@ -49,7 +57,7 @@ def test_stream_one_turn_cuts_over_to_ready_tool(workspace):
     assert end.message["content"][1]["input"] == {"path": "README.md"}
 
 
-def test_anthropic_block_stop_does_not_dispatch_before_full_message():
+def test_anthropic_block_stop_emits_tool_ready_before_full_message():
     content_blocks = []
     usage = {"input_tokens": 10, "output_tokens": 3}
 
@@ -86,7 +94,9 @@ def test_anthropic_block_stop_does_not_dispatch_before_full_message():
         usage,
     ))
 
-    assert events == []
+    ready = [event for event in events if isinstance(event, ToolUseReady)]
+    assert len(ready) == 1
+    assert ready[0].message["content"][0]["input"] == {"path": "README.md"}
     assert _finalized_assistant_message(content_blocks)["content"] == [
         {
             "type": "tool_use",
@@ -136,7 +146,9 @@ def test_anthropic_multiple_tool_blocks_survive_until_final_message():
             content_blocks,
             usage,
         ))
-        assert events == []
+        ready = [event for event in events if isinstance(event, ToolUseReady)]
+        assert len(ready) == 1
+        assert ready[0].message["content"][-1]["input"] == {"path": path}
 
     msg = _finalized_assistant_message(content_blocks)
     assert [b["id"] for b in msg["content"]] == ["toolu_1", "toolu_2"]
@@ -238,6 +250,19 @@ def test_tool_progress_detail_surfaces_partial_write_file():
     assert "demo.html" in detail
     assert "2 line(s)" in detail
     assert "chars" in detail
+
+
+def test_tool_progress_preview_surfaces_tail_of_partial_file():
+    event = ToolUseProgress(
+        name="write_file",
+        call_id="toolu_1",
+        argument_chars=120,
+        partial_json='{"path":"demo.html","content":"<html>\\n<body>\\n<canvas id=\\"c\\">\\n<script>tick()',
+    )
+
+    preview = loop._tool_progress_preview(event)
+
+    assert preview[-2:] == ['<canvas id="c">', "<script>tick()"]
 
 
 def test_hidden_reasoning_stall_aborts(monkeypatch, workspace):

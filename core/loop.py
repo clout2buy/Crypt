@@ -492,6 +492,7 @@ def _stream_one_turn(
                         argument_chars=event.argument_chars,
                         call_id=event.call_id,
                         detail=_tool_progress_detail(event),
+                        preview=_tool_progress_preview(event),
                     )
             elif isinstance(event, TextDelta):
                 thinking_started_at = None
@@ -655,6 +656,19 @@ def _tool_progress_detail(event: ToolUseProgress) -> str:
         cmd = str(parsed.get("command") or "")
         return cmd[:120] if cmd else f"{len(partial):,} arg chars"
     return f"{len(partial):,} arg chars"
+
+
+def _tool_progress_preview(event: ToolUseProgress) -> list[str]:
+    if event.name not in {"write_file", "edit_file"} or not event.partial_json:
+        return []
+    parsed = _partial_tool_args(event.partial_json)
+    content = str(parsed.get("content") or parsed.get("new") or "")
+    if not content:
+        return []
+    lines = [line.rstrip() for line in content.splitlines() if line.strip()]
+    if not lines:
+        return []
+    return lines[-3:]
 
 
 def _partial_tool_args(partial: str) -> dict:

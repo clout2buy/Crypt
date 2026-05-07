@@ -226,6 +226,7 @@ def test_tool_progress_renders_detail():
             argument_chars=2048,
             call_id="toolu_123456789",
             detail="demo.html - 80 line(s), 4,200 chars",
+            preview=["<canvas id=\"stage\">", "requestAnimationFrame(tick)"],
         )
 
         rendered = ui._build_tool_progress()
@@ -235,5 +236,6 @@ def test_tool_progress_renders_detail():
         assert "assembling write_file" in plain
         assert "demo.html" in plain
         assert "80 line(s)" in plain
+        assert "requestAnimationFrame" in plain
     finally:
         ui.tool_progress_clear()
