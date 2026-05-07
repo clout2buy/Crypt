@@ -114,6 +114,70 @@ def test_openai_codex_auth_label_uses_chatgpt_oauth(monkeypatch):
     assert present == "ChatGPT OAuth (me@example.com)"
 
 
+def test_login_if_needed_runs_chatgpt_login_before_provider(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    calls: list[str] = []
+
+    monkeypatch.setattr(main.ui, "ask", lambda prompt: True)
+    monkeypatch.setattr(main, "_do_login", lambda provider: calls.append(provider) or 0)
+    monkeypatch.setattr(
+        main,
+        "_credential",
+        lambda provider: main.auth.Credential(kind="oauth", token="token", account_id="account-123")
+        if calls
+        else None,
+    )
+
+    cred = main._login_if_needed(settings.PROVIDER_OPENAI_CODEX, None)
+
+    assert calls == [settings.PROVIDER_OPENAI_CODEX]
+    assert cred is not None
+    assert cred.account_id == "account-123"
+
+
+def test_login_if_needed_repairs_incomplete_chatgpt_credential(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    calls: list[str] = []
+    incomplete = main.auth.Credential(kind="oauth", token="token")
+
+    monkeypatch.setattr(main.ui, "ask", lambda prompt: "account id is missing" in prompt)
+    monkeypatch.setattr(main, "_do_login", lambda provider: calls.append(provider) or 0)
+    monkeypatch.setattr(
+        main,
+        "_credential",
+        lambda provider: main.auth.Credential(kind="oauth", token="token-2", account_id="account-456"),
+    )
+
+    cred = main._login_if_needed(settings.PROVIDER_OPENAI_CODEX, incomplete)
+
+    assert calls == [settings.PROVIDER_OPENAI_CODEX]
+    assert cred is not None
+    assert cred.token == "token-2"
+    assert cred.account_id == "account-456"
+
+
+def test_login_if_needed_does_not_prompt_for_openai_api_provider(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    def fail_if_called(prompt):
+        raise AssertionError(f"unexpected prompt: {prompt}")
+
+    monkeypatch.setattr(main.ui, "ask", fail_if_called)
+
+    assert main._login_if_needed(settings.PROVIDER_OPENAI, None) is None
+
+
+def test_login_if_needed_does_not_prompt_when_non_interactive(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    def fail_if_called(prompt):
+        raise AssertionError(f"unexpected prompt: {prompt}")
+
+    monkeypatch.setattr(main.ui, "ask", fail_if_called)
+
+    assert main._login_if_needed(settings.PROVIDER_OPENAI_CODEX, None, interactive=False) is None
+
+
 def test_ollama_auth_label_uses_runtime_local_transport_for_cloud_model(monkeypatch):
     _clear_provider_env(monkeypatch)
 

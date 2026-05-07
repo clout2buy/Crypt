@@ -98,6 +98,7 @@ def main() -> int:
     try:
         provider_name, model_override = _startup_choice(saved, args, skip=did_setup)
         cred = _credential(provider_name)
+        cred = _login_if_needed(provider_name, cred, interactive=sys.stdin.isatty())
         provider = _provider(args, saved, provider_name, cred, model_override)
         _save_runtime_choice(args, saved, provider_name, provider.model, cwd)
         session_obj = _session_for_startup(args, cwd, provider)
@@ -131,14 +132,7 @@ def main() -> int:
                 ui.info("Ollama Cloud needs OLLAMA_API_KEY; Anthropic login is not used for Ollama")
 
             cred = _credential(provider_name)
-            if provider_name == settings.PROVIDER_ANTHROPIC and not cred:
-                if ui.ask("log in to Anthropic OAuth now?"):
-                    _do_login(provider_name)
-                    cred = _credential(provider_name)
-            if provider_name == settings.PROVIDER_OPENAI_CODEX and not cred:
-                if ui.ask("log in to ChatGPT now?"):
-                    _do_login(provider_name)
-                    cred = _credential(provider_name)
+            cred = _login_if_needed(provider_name, cred, interactive=sys.stdin.isatty())
 
             provider = _provider(args, saved, provider_name, cred, model_override)
             _save_runtime_choice(args, saved, provider_name, provider.model, Path(runtime.cwd()))
@@ -169,6 +163,9 @@ def main() -> int:
                 break
 
             cred = _credential(provider_name)
+            if not _credential_is_usable(provider_name, cred):
+                ui.error(_provider_missing_auth_message(provider_name))
+                continue
             provider = _provider(args, settings.load_config(), provider_name, cred, model_override)
             ui.clear_screen()
             _welcome(provider, cred, str(cwd), args, settings.load_config())
@@ -361,6 +358,53 @@ def _credential(provider_name: str) -> auth.Credential | None:
     return None
 
 
+def _credential_is_usable(provider_name: str, cred: auth.Credential | None) -> bool:
+    if provider_name == settings.PROVIDER_ANTHROPIC:
+        return cred is not None
+    if provider_name == settings.PROVIDER_OPENAI_CODEX:
+        return bool(cred and cred.token and cred.account_id)
+    return True
+
+
+def _provider_missing_auth_message(provider_name: str) -> str:
+    if provider_name == settings.PROVIDER_ANTHROPIC:
+        return "Anthropic auth is missing; run `python main.py login --provider anthropic`."
+    if provider_name == settings.PROVIDER_OPENAI_CODEX:
+        return "ChatGPT OAuth is missing or incomplete; run `python main.py login --provider openai-codex`."
+    return "provider auth is missing"
+
+
+def _login_prompt(provider_name: str, cred: auth.Credential | None) -> str | None:
+    if provider_name == settings.PROVIDER_ANTHROPIC:
+        return "log in to Anthropic OAuth now?"
+    if provider_name == settings.PROVIDER_OPENAI_CODEX:
+        if cred:
+            return "ChatGPT OAuth account id is missing; log in to ChatGPT again?"
+        return "log in to ChatGPT now?"
+    return None
+
+
+def _login_if_needed(
+    provider_name: str,
+    cred: auth.Credential | None,
+    *,
+    interactive: bool = True,
+) -> auth.Credential | None:
+    if _credential_is_usable(provider_name, cred):
+        return cred
+    if not interactive:
+        return cred
+
+    prompt = _login_prompt(provider_name, cred)
+    if not prompt:
+        return cred
+
+    if ui.ask(prompt):
+        if _do_login(provider_name) == 0:
+            return _credential(provider_name)
+    return cred
+
+
 def _env_truthy(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -418,8 +462,8 @@ def _provider(
         )
 
     if provider_name == settings.PROVIDER_OPENAI_CODEX:
-        if not cred:
-            raise RuntimeError("ChatGPT OAuth is missing; run `python main.py login --provider openai-codex`.")
+        if not _credential_is_usable(provider_name, cred):
+            raise RuntimeError(_provider_missing_auth_message(provider_name))
         return OpenAICodexProvider(
             model=model_override or args.model or settings.model_default(provider_name, saved),
             auth_token=cred.token,
