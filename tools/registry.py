@@ -164,6 +164,11 @@ def dispatch(
         _begin(summary_text)
 
     validation_errors = _validate_args(tool, args)
+    if tool.validate:
+        try:
+            validation_errors.extend(tool.validate(args))
+        except Exception as e:
+            validation_errors.append(f"semantic validation failed: {type(e).__name__}: {e}")
     if validation_errors:
         shown = "; ".join(validation_errors[:4])
         if len(validation_errors) > 4:

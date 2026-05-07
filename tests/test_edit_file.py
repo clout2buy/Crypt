@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from core import file_state
-from tools import edit_file
+from tools import edit_file, registry
 
 
 def setup_read(p: Path) -> None:
@@ -113,3 +113,14 @@ def test_preview_empty_on_bad_input(workspace: Path):
     p.write_text("a\n")
     setup_read(p)
     assert edit_file.preview({"path": str(p), "old": "GHOST", "new": "x"}) == ""
+
+
+def test_empty_edit_call_fails_validation_before_approval(workspace: Path):
+    p = workspace / "x.py"
+    p.write_text("a\n")
+    setup_read(p)
+
+    ok, msg = registry.dispatch("edit_file", {"path": str(p)}, render=False)
+
+    assert ok is False
+    assert "provide old+new" in msg

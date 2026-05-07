@@ -31,6 +31,7 @@ AUTO_EDIT_TOOLS = {
     "bash",
     "bash_start",
     "edit_file",
+    "multi_edit",
     "write_file",
     "open_file",
 }

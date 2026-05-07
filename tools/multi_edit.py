@@ -49,6 +49,8 @@ def _normalize_changes(args: dict) -> list[tuple[str, list[tuple[str, str]]]]:
 
         edits: list[tuple[str, str]] = []
         if isinstance(entry.get("edits"), list):
+            if not entry["edits"]:
+                raise ValueError(f"changes[{i - 1}].edits must be non-empty")
             for j, e in enumerate(entry["edits"]):
                 if isinstance(e, dict) and "old" in e and "new" in e:
                     edits.append((str(e["old"]), str(e["new"])))
@@ -62,8 +64,13 @@ def _normalize_changes(args: dict) -> list[tuple[str, list[tuple[str, str]]]]:
             raise ValueError(
                 f"changes[{i - 1}] needs `old`+`new` or `edits: [...]`"
             )
+        if not edits:
+            raise ValueError(f"changes[{i - 1}] has no edits")
         by_path.setdefault(path, []).extend(edits)
-    return list(by_path.items())
+    grouped = list(by_path.items())
+    if not any(edits for _, edits in grouped):
+        raise ValueError("multi_edit needs at least one edit")
+    return grouped
 
 
 def _resolve_and_check(path_str: str) -> Path:
@@ -177,6 +184,14 @@ def preview(args: dict) -> str:
     return "\n".join(parts)
 
 
+def validate(args: dict) -> list[str]:
+    try:
+        _normalize_changes(args)
+    except Exception as e:
+        return [str(e)]
+    return []
+
+
 def summary(args: dict) -> str:
     raw = args.get("changes") or []
     if not isinstance(raw, list):
@@ -259,4 +274,5 @@ TOOL = Tool(
     priority=42,  # Right after edit_file (40) so it shows next in tool guidance.
     summary=summary,
     preview=preview,
+    validate=validate,
 )

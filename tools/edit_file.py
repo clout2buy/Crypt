@@ -148,12 +148,24 @@ def _parse_edits(args: dict) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     if isinstance(args.get("edits"), list):
         for e in args["edits"]:
-            if isinstance(e, dict):
-                out.append((str(e.get("old", "")), str(e.get("new", ""))))
+            if isinstance(e, dict) and "old" in e and "new" in e:
+                out.append((str(e["old"]), str(e["new"])))
         return out
-    if "old" in args:
+    if "old" in args and "new" in args:
         return [(str(args.get("old", "")), str(args.get("new", "")))]
     return out
+
+
+def validate(args: dict) -> list[str]:
+    if "edits" in args:
+        if not isinstance(args.get("edits"), list) or not args["edits"]:
+            return ["edits: expected a non-empty array of {old, new} objects"]
+        return []
+    if "old" in args or "new" in args:
+        if "old" not in args or "new" not in args:
+            return ["single-edit mode requires both old and new"]
+        return []
+    return ["provide old+new or a non-empty edits array"]
 
 
 def _preview(text: str, n: int = 60) -> str:
@@ -234,4 +246,5 @@ TOOL = Tool(
     priority=40,
     summary=summary,
     preview=preview,
+    validate=validate,
 )

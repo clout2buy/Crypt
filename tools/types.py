@@ -33,3 +33,7 @@ class Tool:
     # Should be cheap and side-effect-free. May raise; raises are swallowed
     # by the dispatcher so the user still sees the standard prompt.
     preview: Callable[[dict], str] | None = None
+    # Optional semantic validation that the simple JSON-schema checker cannot
+    # express, such as "old+new or non-empty edits[]". Return a list of
+    # human-readable errors; dispatch surfaces them before approvals.
+    validate: Callable[[dict], list[str]] | None = None

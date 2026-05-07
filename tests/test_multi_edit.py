@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from core import file_state
-from tools import multi_edit
+from tools import multi_edit, registry
 
 
 def setup_read(p: Path) -> None:
@@ -113,3 +113,18 @@ def test_summary_shape():
     ]})
     assert "2" in s  # 2 files
     assert "3" in s  # 3 edits
+
+
+def test_empty_edits_are_rejected_before_approval(workspace: Path):
+    a = workspace / "a.txt"
+    a.write_text("alpha\n")
+    setup_read(a)
+
+    ok, msg = registry.dispatch(
+        "multi_edit",
+        {"changes": [{"path": str(a), "edits": []}]},
+        render=False,
+    )
+
+    assert ok is False
+    assert "non-empty" in msg

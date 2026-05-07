@@ -9,6 +9,7 @@ def _stub_tool(
     name: str = "stub",
     permission: str = "auto",
     classify=None,
+    validate=None,
     runner=lambda args: f"ran {args}",
     parallel_safe: bool = False,
 ) -> Tool:
@@ -19,6 +20,7 @@ def _stub_tool(
         permission=permission,
         run=runner,
         classify=classify,
+        validate=validate,
         parallel_safe=parallel_safe,
         summary=lambda args: str(args.get("x", "")),
     )
@@ -91,6 +93,19 @@ def test_schema_validation_checks_nested_enum(monkeypatch):
     assert ok is False
     assert "items[0].status" in msg
     assert "expected one of" in msg
+
+
+def test_semantic_validation_runs_before_approval(monkeypatch):
+    tool = _stub_tool(
+        permission="ask",
+        validate=lambda args: ["x cannot be bad"] if args.get("x") == "bad" else [],
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    ok, msg = registry.dispatch(tool.name, {"x": "bad"}, render=False)
+
+    assert ok is False
+    assert "x cannot be bad" in msg
 
 
 def test_auto_tool_runs_without_prompt(monkeypatch):

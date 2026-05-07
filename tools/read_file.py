@@ -55,12 +55,13 @@ def run(args: dict) -> str:
 
     max_bytes = _max_bytes()
     clipped = len(numbered) > max_bytes
+    full_range = sliced and start == 0 and end >= len(all_lines)
     file_state.record_read(
         path,
         raw,
         offset=int(raw_offset) if raw_offset else None,
         limit=int(raw_limit) if raw_limit else None,
-        partial=sliced or clipped,
+        partial=(sliced and not full_range) or clipped,
     )
 
     return clip(numbered, max_bytes)

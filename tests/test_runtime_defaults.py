@@ -10,6 +10,7 @@ def test_default_approval_mode_auto_approves_work_tools():
         assert runtime.approval_label() == "auto-work"
         assert runtime.can_auto_approve("write_file") is True
         assert runtime.can_auto_approve("edit_file") is True
+        assert runtime.can_auto_approve("multi_edit") is True
         assert runtime.can_auto_approve("bash") is True
         assert runtime.can_auto_approve("bash_start") is True
     finally:

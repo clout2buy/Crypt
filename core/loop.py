@@ -294,6 +294,10 @@ def _run_until_done(
         artifact_empty_retry_used = False
         while used < budget:
             _ensure_tool_result_pairing(messages)
+            if not is_subagent:
+                shrunk_tokens = _maybe_shrink_context(provider, messages, render=render)
+                if shrunk_tokens is not None:
+                    current_tokens = shrunk_tokens
             artifact_fast_lane = _artifact_fast_lane_active(messages, is_subagent=is_subagent)
             tools = _tools_for_turn(
                 messages,
@@ -452,10 +456,13 @@ def _run_until_done(
             # LLM call, runs every turn so big-bash-output sessions don't
             # creep up to the 72% full-compaction threshold unnecessarily.
             window = getattr(provider, "context_window", 200_000)
-            if current_tokens > window // 2:
-                elided = compact.micro_compact(messages)
+            approx_tokens = compact.rough_tokens(messages)
+            if approx_tokens > window // 3:
+                elided = compact.micro_compact(messages, keep_recent=4, min_bytes=2_000)
                 if elided and render and not is_subagent:
                     ui.info(f"micro-compacted {elided} stale tool result(s)")
+                if elided:
+                    current_tokens = compact.rough_tokens(messages)
 
             # Budget check: instead of dying silently at max_turns, ask the
             # user whether to extend. Subagents just stop at their cap.
@@ -475,6 +482,39 @@ def _run_until_done(
     finally:
         if loader.running:
             loader.stop()
+
+
+def _maybe_shrink_context(provider: Provider, messages: list[dict], *, render: bool) -> int | None:
+    """Keep same-task tool loops below provider context limits.
+
+    The top-level loop compacts before a new user turn, but long tool loops can
+    grow by hundreds of KB before returning to the prompt. Shrink just before
+    each model call so repeated reads/failed edit attempts do not accumulate
+    until the provider rejects the request.
+    """
+    window = getattr(provider, "context_window", 200_000)
+    approx = compact.rough_tokens(messages)
+    changed = False
+    if approx > window // 3:
+        elided = compact.micro_compact(messages, keep_recent=4, min_bytes=2_000)
+        if elided and render:
+            ui.info(f"micro-compacted {elided} stale tool result(s)")
+        if elided:
+            changed = True
+            approx = compact.rough_tokens(messages)
+
+    if compact.should_compact(messages, window, pct=0.68):
+        if render:
+            ui.info("auto-compacting context before continuing")
+        summary, compacted = compact.compact_messages(provider, messages)
+        messages[:] = compacted
+        if runtime.session():
+            runtime.session().record_compaction(summary, len(messages), messages)
+        approx = compact.rough_tokens(messages)
+        if render:
+            ui.info(f"compacted context to {len(messages)} message(s)")
+        changed = True
+    return approx if changed else None
 
 
 def _run_subagent(provider: Provider, prompt: str, context: str | None = None) -> str:

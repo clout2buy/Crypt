@@ -6,6 +6,7 @@ here; we test the deterministic pieces it relies on.
 from __future__ import annotations
 
 from core import compact
+from core import loop
 
 
 def _block_pair(idx: int, body: str, name: str = "read_file"):
@@ -103,3 +104,25 @@ def test_rough_tokens_monotonic():
     a = [{"role": "user", "content": "hi"}]
     b = a + [{"role": "user", "content": "x" * 1000}]
     assert compact.rough_tokens(b) > compact.rough_tokens(a)
+
+
+def test_loop_shrinks_same_task_tool_bloat_before_next_model_call():
+    class _Provider:
+        context_window = 20_000
+
+    msgs = [{"role": "user", "content": "go"}]
+    for i in range(10):
+        msgs.extend(_block_pair(i, "X" * 3_000))
+
+    before = compact.rough_tokens(msgs)
+    after = loop._maybe_shrink_context(_Provider(), msgs, render=False)
+
+    assert after is not None
+    assert after < before
+    assert any(
+        isinstance(block, dict)
+        and block.get("type") == "tool_result"
+        and str(block.get("content", "")).startswith("[old tool result elided")
+        for msg in msgs
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+    )
