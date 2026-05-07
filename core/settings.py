@@ -21,7 +21,8 @@ CONFIG_PATH = APP_DIR / "config.json"
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_OLLAMA = "ollama"
 PROVIDER_OPENAI = "openai"
-PROVIDERS = (PROVIDER_ANTHROPIC, PROVIDER_OLLAMA, PROVIDER_OPENAI)
+PROVIDER_OPENAI_CODEX = "openai-codex"
+PROVIDERS = (PROVIDER_ANTHROPIC, PROVIDER_OPENAI, PROVIDER_OPENAI_CODEX, PROVIDER_OLLAMA)
 
 ANTHROPIC_MODEL = "claude-opus-4-7"
 # Anthropic counts the full requested max_tokens against per-minute rate
@@ -54,6 +55,19 @@ OPENAI_MODELS = (
     "gpt-4.1-mini",
     "o3",
     "o3-mini",
+)
+OPENAI_CODEX_MODEL = "gpt-5-codex"
+OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
+OPENAI_CODEX_MAX_TOKENS = 32_000
+OPENAI_CODEX_MODELS = (
+    "gpt-5-codex",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+    "gpt-5.2",
+    "codex-mini-latest",
 )
 
 OLLAMA_MODEL = "gpt-oss:20b"
@@ -196,6 +210,8 @@ def model_default(provider: str, saved: dict | None = None) -> str:
         return os.getenv("ANTHROPIC_MODEL") or saved.get("anthropic_model") or ANTHROPIC_MODEL
     if provider == PROVIDER_OPENAI:
         return os.getenv("OPENAI_MODEL") or saved.get("openai_model") or OPENAI_MODEL
+    if provider == PROVIDER_OPENAI_CODEX:
+        return os.getenv("OPENAI_CODEX_MODEL") or saved.get("openai_codex_model") or OPENAI_CODEX_MODEL
     explicit = os.getenv("OLLAMA_MODEL")
     if explicit:
         return explicit
@@ -209,6 +225,16 @@ def openai_base_url(saved: dict | None = None) -> str:
     LM Studio, vLLM, etc.) without code changes."""
     saved = load_config() if saved is None else saved
     return os.getenv("OPENAI_BASE_URL") or saved.get("openai_base_url") or OPENAI_BASE_URL
+
+
+def openai_codex_base_url(saved: dict | None = None) -> str:
+    """Returns the ChatGPT/Codex backend base URL (env > saved > default)."""
+    saved = load_config() if saved is None else saved
+    return (
+        os.getenv("OPENAI_CODEX_BASE_URL")
+        or saved.get("openai_codex_base_url")
+        or OPENAI_CODEX_BASE_URL
+    )
 
 
 def ollama_host(cli_host: str | None = None, saved: dict | None = None) -> str:

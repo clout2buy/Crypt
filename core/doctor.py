@@ -248,6 +248,7 @@ def _check_provider_auth() -> Check:
         PROVIDER_ANTHROPIC,
         PROVIDER_OLLAMA,
         PROVIDER_OPENAI,
+        PROVIDER_OPENAI_CODEX,
         is_local_host,
         is_ollama_cloud_host,
         load_config,
@@ -259,7 +260,7 @@ def _check_provider_auth() -> Check:
         saved = load_config()
         provider = provider_default(saved)
         if provider == PROVIDER_ANTHROPIC:
-            stored = auth.load() or {}
+            stored = auth.load_provider("anthropic") or {}
             if os.getenv("ANTHROPIC_API_KEY") or stored.get("access"):
                 return Check("provider auth", True, "Anthropic credentials available")
             return Check("provider auth", False, "Anthropic selected; run login or set ANTHROPIC_API_KEY")
@@ -268,6 +269,12 @@ def _check_provider_auth() -> Check:
             if os.getenv("OPENAI_API_KEY"):
                 return Check("provider auth", True, "OPENAI_API_KEY is set")
             return Check("provider auth", False, "OpenAI selected; set OPENAI_API_KEY")
+
+        if provider == PROVIDER_OPENAI_CODEX:
+            stored = auth.load_provider("openai-codex") or {}
+            if stored.get("access") and stored.get("account_id"):
+                return Check("provider auth", True, "ChatGPT OAuth credentials available")
+            return Check("provider auth", False, "OpenAI Codex selected; run login --provider openai-codex")
 
         if provider == PROVIDER_OLLAMA:
             host = ollama_host(saved=saved)
@@ -297,6 +304,7 @@ def _check_known_model() -> Check:
         ANTHROPIC_MODELS,
         OLLAMA_MODELS,
         OPENAI_MODELS,
+        OPENAI_CODEX_MODELS,
         load_config,
         provider_default,
         model_default,
@@ -309,6 +317,8 @@ def _check_known_model() -> Check:
         known = ANTHROPIC_MODELS
     elif provider == "openai":
         known = OPENAI_MODELS
+    elif provider == "openai-codex":
+        known = OPENAI_CODEX_MODELS
     else:
         known = OLLAMA_MODELS
     if model in known:

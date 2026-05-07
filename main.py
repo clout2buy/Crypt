@@ -17,7 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from core import auth, runtime, session as sessions, settings, ui
-from core.api import AnthropicProvider, OllamaProvider, OpenAIProvider
+from core.api import AnthropicProvider, OllamaProvider, OpenAICodexProvider, OpenAIProvider
 from core.loop import run
 
 
@@ -27,7 +27,11 @@ def main() -> int:
     saved = settings.load_config()
 
     p = argparse.ArgumentParser(prog="crypt", description="local-first coding harness")
-    p.add_argument("--provider", choices=settings.PROVIDERS, help="anthropic oauth, openai-compatible, or ollama")
+    p.add_argument(
+        "--provider",
+        choices=settings.PROVIDERS,
+        help="anthropic oauth, openai-compatible, openai-codex oauth, or ollama",
+    )
     p.add_argument("--model", help="model id; overrides saved/default model")
     p.add_argument("--cwd", help="workspace root for tools")
     p.add_argument("--max-tokens", type=int, help="Anthropic response token cap")
@@ -68,7 +72,7 @@ def main() -> int:
     args = p.parse_args()
 
     if args.command == "login":
-        return _do_login()
+        return _do_login(args.provider or settings.provider_default(saved))
     if args.command == "logout":
         return _do_logout()
     if args.command == "setup":
@@ -110,6 +114,7 @@ def main() -> int:
                 [
                     (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
                     (settings.PROVIDER_OPENAI, "OpenAI (or compatible)"),
+                    (settings.PROVIDER_OPENAI_CODEX, "ChatGPT OAuth (Codex)"),
                     (settings.PROVIDER_OLLAMA, "Ollama (local/cloud)"),
                 ],
                 getattr(active_provider, "name", provider_name),
@@ -128,7 +133,11 @@ def main() -> int:
             cred = _credential(provider_name)
             if provider_name == settings.PROVIDER_ANTHROPIC and not cred:
                 if ui.ask("log in to Anthropic OAuth now?"):
-                    _do_login()
+                    _do_login(provider_name)
+                    cred = _credential(provider_name)
+            if provider_name == settings.PROVIDER_OPENAI_CODEX and not cred:
+                if ui.ask("log in to ChatGPT now?"):
+                    _do_login(provider_name)
                     cred = _credential(provider_name)
 
             provider = _provider(args, saved, provider_name, cred, model_override)
@@ -150,7 +159,7 @@ def main() -> int:
                 session_obj=session_obj,
             )
             if result == "login":
-                _do_login()
+                _do_login(provider_name)
             elif result == "logout":
                 _do_logout()
             elif result == "model":
@@ -209,6 +218,7 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
         [
             ("anthropic", "Anthropic OAuth"),
             ("openai", "OpenAI (or compatible)"),
+            ("openai-codex", "ChatGPT OAuth (Codex)"),
             ("ollama", "Ollama (local/cloud)"),
         ],
         settings.provider_default(saved),
@@ -230,6 +240,13 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
         }
         if not os.getenv("OPENAI_API_KEY"):
             ui.info("OPENAI_API_KEY is not set; set it before using OpenAI")
+    elif provider == settings.PROVIDER_OPENAI_CODEX:
+        model = args.model or _pick_model(provider, saved)
+        values = {
+            "workspace": str(workspace),
+            "provider": provider,
+            "openai_codex_model": model,
+        }
     else:
         host = settings.ollama_host(args.ollama_host, saved)
         model = args.model or _pick_model(provider, saved, host=host)
@@ -247,8 +264,14 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
     os.environ["CRYPT_ROOT"] = str(workspace)
     ui.info(f"saved setup in {settings.CONFIG_PATH}")
 
-    if provider == settings.PROVIDER_ANTHROPIC and not auth.resolve() and ui.ask("log in to Anthropic OAuth now?"):
-        _do_login()
+    if provider == settings.PROVIDER_ANTHROPIC and not auth.resolve_anthropic() and ui.ask("log in to Anthropic OAuth now?"):
+        _do_login(provider)
+    if (
+        provider == settings.PROVIDER_OPENAI_CODEX
+        and not auth.resolve_openai_codex()
+        and ui.ask("log in to ChatGPT now?")
+    ):
+        _do_login(provider)
     return new_saved
 
 
@@ -265,6 +288,7 @@ def _startup_choice(saved: dict, args: argparse.Namespace, skip: bool = False) -
         [
             (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
             (settings.PROVIDER_OPENAI, "OpenAI (or compatible)"),
+            (settings.PROVIDER_OPENAI_CODEX, "ChatGPT OAuth (Codex)"),
             (settings.PROVIDER_OLLAMA, "Ollama (local/cloud)"),
         ],
         provider_name,
@@ -307,6 +331,8 @@ def _pick_model(provider: str, saved: dict, *, host: str | None = None) -> str:
         models = settings.ANTHROPIC_MODELS
     elif provider == settings.PROVIDER_OPENAI:
         models = settings.OPENAI_MODELS
+    elif provider == settings.PROVIDER_OPENAI_CODEX:
+        models = settings.OPENAI_CODEX_MODELS
     else:
         models = settings.OLLAMA_MODELS
     default = settings.model_default(provider, saved)
@@ -328,7 +354,11 @@ def _pick_model(provider: str, saved: dict, *, host: str | None = None) -> str:
 
 
 def _credential(provider_name: str) -> auth.Credential | None:
-    return auth.resolve() if provider_name == settings.PROVIDER_ANTHROPIC else None
+    if provider_name == settings.PROVIDER_ANTHROPIC:
+        return auth.resolve_anthropic()
+    if provider_name == settings.PROVIDER_OPENAI_CODEX:
+        return auth.resolve_openai_codex()
+    return None
 
 
 def _env_truthy(name: str) -> bool:
@@ -346,6 +376,11 @@ def _provider_auth_label(
         return cred.kind if cred else "missing Anthropic auth"
     if provider_name == settings.PROVIDER_OPENAI:
         return "OPENAI_API_KEY" if os.getenv("OPENAI_API_KEY") else "missing OPENAI_API_KEY"
+    if provider_name == settings.PROVIDER_OPENAI_CODEX:
+        if cred:
+            suffix = f" ({cred.email})" if cred.email else ""
+            return f"ChatGPT OAuth{suffix}"
+        return "missing ChatGPT OAuth"
 
     host = getattr(provider, "_base_url", "") or settings.ollama_host(getattr(args, "ollama_host", None), saved or {})
     if settings.is_ollama_cloud_host(host):
@@ -380,6 +415,20 @@ def _provider(
             model=model_override or args.model or settings.model_default(provider_name, saved),
             max_tokens=args.max_tokens or settings.env_int("OPENAI_MAX_TOKENS", settings.OPENAI_MAX_TOKENS),
             base_url=settings.openai_base_url(saved),
+        )
+
+    if provider_name == settings.PROVIDER_OPENAI_CODEX:
+        if not cred:
+            raise RuntimeError("ChatGPT OAuth is missing; run `python main.py login --provider openai-codex`.")
+        return OpenAICodexProvider(
+            model=model_override or args.model or settings.model_default(provider_name, saved),
+            auth_token=cred.token,
+            account_id=cred.account_id,
+            max_tokens=args.max_tokens or settings.env_int(
+                "OPENAI_CODEX_MAX_TOKENS",
+                settings.OPENAI_CODEX_MAX_TOKENS,
+            ),
+            base_url=settings.openai_codex_base_url(saved),
         )
 
     host = settings.ollama_host(args.ollama_host, saved)
@@ -458,6 +507,8 @@ def _save_runtime_choice(
         values["anthropic_model"] = model
     elif provider_name == settings.PROVIDER_OPENAI:
         values["openai_model"] = model
+    elif provider_name == settings.PROVIDER_OPENAI_CODEX:
+        values["openai_codex_model"] = model
     else:
         values["ollama_model"] = model
         host = settings.ollama_host(args.ollama_host, saved)
@@ -477,26 +528,43 @@ def _welcome(
         provider=provider.name,
         model=provider.model,
         auth_kind=_provider_auth_label(provider_name, args, saved, cred, provider=provider),
-        auth_email=cred.email if provider_name == settings.PROVIDER_ANTHROPIC and cred else None,
-        auth_plan=cred.plan if provider_name == settings.PROVIDER_ANTHROPIC and cred else None,
+        auth_email=cred.email if provider_name in {settings.PROVIDER_ANTHROPIC, settings.PROVIDER_OPENAI_CODEX} and cred else None,
+        auth_plan=cred.plan if provider_name in {settings.PROVIDER_ANTHROPIC, settings.PROVIDER_OPENAI_CODEX} and cred else None,
         cwd=cwd,
     )
 
 
-def _do_login() -> int:
+def _do_login(provider_name: str = settings.PROVIDER_ANTHROPIC) -> int:
     try:
-        from core.oauth import login
-
-        tokens = login(on_status=lambda m: ui.info(m))
         now_ms = int(time.time() * 1000)
-        expires_in = tokens.get("expires_in", 3600)
-        auth.save({
-            "type": "oauth",
-            "access": tokens["access_token"],
-            "refresh": tokens.get("refresh_token"),
-            "expires": now_ms + expires_in * 1000 - 5 * 60 * 1000,
-        })
-        ui.info("logged in")
+        if provider_name == settings.PROVIDER_OPENAI_CODEX:
+            from core.openai_oauth import login
+
+            tokens = login(on_status=lambda m: ui.info(m))
+            expires_in = tokens.get("expires_in", 3600)
+            claims = tokens.get("claims") or {}
+            auth.save_provider("openai-codex", {
+                "type": "openai-codex",
+                "access": tokens["access_token"],
+                "refresh": tokens.get("refresh_token"),
+                "expires": now_ms + expires_in * 1000 - 5 * 60 * 1000,
+                "account_id": tokens.get("account_id"),
+                "email": claims.get("email"),
+                "plan": tokens.get("plan"),
+            })
+            ui.info("logged in to ChatGPT")
+        else:
+            from core.oauth import login
+
+            tokens = login(on_status=lambda m: ui.info(m))
+            expires_in = tokens.get("expires_in", 3600)
+            auth.save_provider("anthropic", {
+                "type": "oauth",
+                "access": tokens["access_token"],
+                "refresh": tokens.get("refresh_token"),
+                "expires": now_ms + expires_in * 1000 - 5 * 60 * 1000,
+            })
+            ui.info("logged in")
         return 0
     except Exception as e:
         ui.error(f"login failed: {e}")

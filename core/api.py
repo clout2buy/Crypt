@@ -29,6 +29,9 @@ from .settings import (
     ANTHROPIC_THINKING_BUDGET,
     OLLAMA_MODEL,
     OPENAI_BASE_URL,
+    OPENAI_CODEX_BASE_URL,
+    OPENAI_CODEX_MAX_TOKENS,
+    OPENAI_CODEX_MODEL,
     OPENAI_MAX_TOKENS,
     OPENAI_MODEL,
 )
@@ -621,6 +624,237 @@ class OpenAIProvider:
         return m.startswith("o1") or m.startswith("o3") or m.startswith("o4")
 
 
+class OpenAICodexProvider:
+    """ChatGPT OAuth adapter for OpenAI Codex's Responses backend.
+
+    This is intentionally separate from ``OpenAIProvider``. ChatGPT/Codex
+    subscription auth does not speak the classic Chat Completions endpoint;
+    it uses the Codex Responses backend with a ChatGPT OAuth bearer token and
+    a ``ChatGPT-Account-ID`` routing header.
+    """
+
+    name = "openai-codex"
+    context_window = 272_000
+    is_oauth = True
+
+    def __init__(
+        self,
+        model: str = OPENAI_CODEX_MODEL,
+        auth_token: str | None = None,
+        account_id: str | None = None,
+        max_tokens: int = OPENAI_CODEX_MAX_TOKENS,
+        base_url: str | None = None,
+    ) -> None:
+        if not auth_token:
+            raise RuntimeError("OpenAICodexProvider needs ChatGPT OAuth auth_token.")
+        if not account_id:
+            raise RuntimeError("OpenAICodexProvider needs ChatGPT account_id.")
+        self._auth_token = auth_token
+        self._account_id = account_id
+        self.model = model
+        self._max_tokens = max_tokens
+        self._base_url = (base_url or os.getenv("OPENAI_CODEX_BASE_URL") or OPENAI_CODEX_BASE_URL).rstrip("/")
+        self._http = httpx.Client(timeout=httpx.Timeout(10.0, read=300.0))
+        atexit.register(self.close)
+
+    def close(self) -> None:
+        try:
+            self._http.close()
+        except Exception:
+            pass
+
+    def stream_turn(self, messages, tools, system):
+        body = self._build_body(messages, tools, system)
+        url = _codex_responses_url(self._base_url)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {self._auth_token}",
+            "ChatGPT-Account-ID": self._account_id,
+            "OpenAI-Beta": "responses=experimental",
+            "originator": "crypt",
+            "User-Agent": "crypt",
+        }
+
+        text_buf: list[str] = []
+        tool_calls: dict[str, dict] = {}
+        stop = "end_turn"
+        usage: dict | None = None
+
+        with self._http.stream("POST", url, json=body, headers=headers) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                raise RuntimeError(
+                    f"openai-codex HTTP {resp.status_code}: {resp.text[:500]}"
+                )
+            buf = ""
+            for chunk in resp.iter_text():
+                buf += chunk
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.rstrip("\r")
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+
+                    event_type = str(event.get("type") or "")
+                    if event_type == "error":
+                        err = event.get("error") or event
+                        raise RuntimeError(f"openai-codex error: {err}")
+
+                    if event_type == "response.output_text.delta":
+                        text = str(event.get("delta") or "")
+                        if text:
+                            text_buf.append(text)
+                            yield TextDelta(text)
+                        continue
+
+                    if "reasoning" in event_type and event_type.endswith(".delta"):
+                        text = str(event.get("delta") or "")
+                        if text:
+                            yield ThinkingDelta(text)
+                        continue
+
+                    if event_type == "response.output_item.added":
+                        item = event.get("item") or {}
+                        if isinstance(item, dict) and item.get("type") == "function_call":
+                            key = _responses_tool_key(event, item)
+                            slot = tool_calls.setdefault(key, {
+                                "id": item.get("call_id") or item.get("id") or key,
+                                "name": item.get("name") or "",
+                                "arguments": item.get("arguments") or "",
+                            })
+                            if item.get("name"):
+                                slot["name"] = item["name"]
+                        continue
+
+                    if event_type == "response.function_call_arguments.delta":
+                        key = _responses_tool_key(event, event)
+                        slot = tool_calls.setdefault(key, {
+                            "id": event.get("call_id") or key,
+                            "name": event.get("name") or "",
+                            "arguments": "",
+                        })
+                        delta = str(event.get("delta") or "")
+                        slot["arguments"] += delta
+                        if event.get("name"):
+                            slot["name"] = event["name"]
+                        if slot.get("name"):
+                            yield ToolUseProgress(
+                                name=slot["name"],
+                                call_id=slot.get("id", ""),
+                                argument_chars=len(slot.get("arguments") or ""),
+                                partial_json=slot.get("arguments") or "",
+                            )
+                        continue
+
+                    if event_type == "response.function_call_arguments.done":
+                        key = _responses_tool_key(event, event)
+                        slot = tool_calls.setdefault(key, {
+                            "id": event.get("call_id") or key,
+                            "name": event.get("name") or "",
+                            "arguments": "",
+                        })
+                        if event.get("arguments") is not None:
+                            slot["arguments"] = str(event.get("arguments") or "")
+                        if event.get("name"):
+                            slot["name"] = event["name"]
+                        continue
+
+                    if event_type == "response.output_item.done":
+                        item = event.get("item") or {}
+                        if isinstance(item, dict) and item.get("type") == "function_call":
+                            key = _responses_tool_key(event, item)
+                            slot = tool_calls.setdefault(key, {
+                                "id": item.get("call_id") or item.get("id") or key,
+                                "name": "",
+                                "arguments": "",
+                            })
+                            if item.get("call_id") or item.get("id"):
+                                slot["id"] = item.get("call_id") or item.get("id")
+                            if item.get("name"):
+                                slot["name"] = item["name"]
+                            if item.get("arguments") is not None:
+                                slot["arguments"] = str(item.get("arguments") or "")
+                        continue
+
+                    if event_type in {"response.completed", "response.done", "response.incomplete"}:
+                        response = event.get("response") or {}
+                        if isinstance(response, dict):
+                            usage = response.get("usage") if isinstance(response.get("usage"), dict) else None
+                            status = str(response.get("status") or "")
+                            if status == "incomplete":
+                                stop = "max_tokens"
+                        continue
+
+                    if event_type == "response.failed":
+                        response = event.get("response") or {}
+                        error = response.get("error") if isinstance(response, dict) else None
+                        raise RuntimeError(f"openai-codex response failed: {error or event}")
+
+        content: list[dict] = []
+        if text_buf:
+            content.append({"type": "text", "text": "".join(text_buf)})
+        for key in sorted(tool_calls):
+            block = _openai_tool_block(len(content), tool_calls[key], allow_incomplete=True)
+            if block is not None:
+                content.append(block)
+        if any(block.get("type") == "tool_use" for block in content):
+            stop = "tool_use"
+
+        yield TurnEnd(
+            stop_reason=stop,
+            message={"role": "assistant", "content": content},
+            usage=usage,
+        )
+
+    def _build_body(self, messages, tools, system):
+        body: dict = {
+            "model": self.model,
+            "store": False,
+            "stream": True,
+            "instructions": system,
+            "input": _to_responses_input(messages),
+            "text": {"verbosity": "low"},
+            "include": ["reasoning.encrypted_content"],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "max_output_tokens": self._max_tokens,
+        }
+        effort = os.getenv("OPENAI_CODEX_REASONING_EFFORT")
+        if effort:
+            body["reasoning"] = {
+                "effort": effort,
+                "summary": os.getenv("OPENAI_CODEX_REASONING_SUMMARY", "auto"),
+            }
+        if tools:
+            body["tools"] = [_to_responses_tool(t) for t in tools]
+        return body
+
+
+def _codex_responses_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/codex/responses"):
+        return normalized
+    if normalized.endswith("/codex"):
+        return f"{normalized}/responses"
+    return f"{normalized}/codex/responses"
+
+
+def _responses_tool_key(event: dict, item: dict) -> str:
+    for name in ("item_id", "id", "call_id", "output_index"):
+        value = item.get(name) or event.get(name)
+        if value is not None:
+            return str(value)
+    return str(len(event))
+
+
 def _openai_tool_block(
     idx: int,
     slot: dict,
@@ -646,6 +880,87 @@ def _openai_tool_block(
         "id": slot.get("id") or f"call_{idx}",
         "name": name,
         "input": args_obj,
+    }
+
+
+def _to_responses_tool(tool: dict) -> dict:
+    schema = dict(tool.get("input_schema") or tool.get("schema") or {})
+    return {
+        "type": "function",
+        "name": str(tool.get("name", "")),
+        "description": str(tool.get("description", "")),
+        "parameters": schema,
+    }
+
+
+def _to_responses_input(messages: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if isinstance(content, str):
+            out.append({
+                "role": role,
+                "content": [_responses_text_block(role, content)],
+            })
+            continue
+        if not isinstance(content, list):
+            continue
+
+        text_parts: list[str] = []
+        assistant_items: list[dict] = []
+        tool_outputs: list[dict] = []
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                text_parts.append(str(block.get("text", "")))
+            elif btype == "tool_use":
+                assistant_items.append({
+                    "type": "function_call",
+                    "call_id": str(block.get("id", "")),
+                    "name": str(block.get("name", "")),
+                    "arguments": json.dumps(block.get("input") or {}),
+                })
+            elif btype == "tool_result":
+                inner = block.get("content")
+                if isinstance(inner, list):
+                    inner = "".join(
+                        b.get("text", "") if isinstance(b, dict) else str(b)
+                        for b in inner
+                    )
+                tool_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": str(block.get("tool_use_id", "")),
+                    "output": str(inner) if inner is not None else "",
+                })
+            elif btype == "thinking":
+                continue
+
+        text = "".join(text_parts)
+        if role == "assistant":
+            if text:
+                out.append({
+                    "role": "assistant",
+                    "content": [_responses_text_block("assistant", text)],
+                })
+            out.extend(assistant_items)
+        elif role == "user":
+            if text:
+                out.append({
+                    "role": "user",
+                    "content": [_responses_text_block("user", text)],
+                })
+            out.extend(tool_outputs)
+    return out
+
+
+def _responses_text_block(role: str | None, text: str) -> dict:
+    return {
+        "type": "output_text" if role == "assistant" else "input_text",
+        "text": text,
     }
 
 

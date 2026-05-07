@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from core.api import OpenAIProvider, ToolUseProgress, TurnEnd
+from core.api import OpenAICodexProvider, OpenAIProvider, TextDelta, ThinkingDelta, ToolUseProgress, TurnEnd
 
 
 class _FakeStreamResponse:
@@ -89,6 +89,86 @@ def test_openai_tool_progress_includes_partial_json():
 
     turn_end = [event for event in out if isinstance(event, TurnEnd)][0]
     assert turn_end.stop_reason == "tool_use"
+    assert turn_end.message["content"][0]["input"] == {
+        "path": "demo.html",
+        "content": "<p>hi</p>",
+    }
+
+
+def test_openai_codex_uses_chatgpt_backend_headers_and_responses_body():
+    chunks = [
+        _sse({"type": "response.output_text.delta", "delta": "hi"}),
+        _sse({"type": "response.completed", "response": {"status": "completed"}}),
+    ]
+    provider = OpenAICodexProvider(
+        model="gpt-5-codex",
+        auth_token="chatgpt-token",
+        account_id="account-123",
+        base_url="https://chatgpt.com/backend-api",
+    )
+    provider._http = _FakeHTTP(chunks)
+
+    out = list(provider.stream_turn(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+        system="sys",
+    ))
+
+    assert any(isinstance(event, TextDelta) and event.text == "hi" for event in out)
+    call = provider._http.calls[0]
+    assert call["url"] == "https://chatgpt.com/backend-api/codex/responses"
+    assert call["headers"]["Authorization"] == "Bearer chatgpt-token"
+    assert call["headers"]["ChatGPT-Account-ID"] == "account-123"
+    assert call["headers"]["OpenAI-Beta"] == "responses=experimental"
+    assert call["json"]["instructions"] == "sys"
+    assert call["json"]["input"] == [{
+        "role": "user",
+        "content": [{"type": "input_text", "text": "hello"}],
+    }]
+
+
+def test_openai_codex_stream_maps_reasoning_and_tool_calls():
+    chunks = [
+        _sse({"type": "response.reasoning_summary_text.delta", "delta": "plan"}),
+        _sse({
+            "type": "response.output_item.added",
+            "item": {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "write_file",
+                "arguments": "",
+            },
+        }),
+        _sse({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "delta": '{"path":"demo.html"',
+        }),
+        _sse({
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_1",
+            "arguments": '{"path":"demo.html","content":"<p>hi</p>"}',
+        }),
+        _sse({"type": "response.completed", "response": {"status": "completed"}}),
+    ]
+    provider = OpenAICodexProvider(
+        model="gpt-5-codex",
+        auth_token="chatgpt-token",
+        account_id="account-123",
+        base_url="https://chatgpt.com/backend-api",
+    )
+    provider._http = _FakeHTTP(chunks)
+
+    out = list(provider.stream_turn(messages=[], tools=[], system="sys"))
+
+    assert any(isinstance(event, ThinkingDelta) and event.text == "plan" for event in out)
+    progress = [event for event in out if isinstance(event, ToolUseProgress)]
+    assert progress[-1].name == "write_file"
+    assert progress[-1].call_id == "call_1"
+    turn_end = [event for event in out if isinstance(event, TurnEnd)][0]
+    assert turn_end.stop_reason == "tool_use"
+    assert turn_end.message["content"][0]["name"] == "write_file"
     assert turn_end.message["content"][0]["input"] == {
         "path": "demo.html",
         "content": "<p>hi</p>",

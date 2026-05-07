@@ -15,6 +15,8 @@ def _clear_provider_env(monkeypatch) -> None:
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        "OPENAI_CODEX_BASE_URL",
+        "OPENAI_CODEX_MODEL",
         "OLLAMA_API_KEY",
         "OLLAMA_HOST",
     ):
@@ -58,6 +60,9 @@ def test_env_and_saved_provider_precedence(monkeypatch):
     monkeypatch.setenv("CRYPT_PROVIDER", settings.PROVIDER_OPENAI)
     assert settings.provider_default({"provider": settings.PROVIDER_ANTHROPIC}) == settings.PROVIDER_OPENAI
 
+    monkeypatch.setenv("CRYPT_PROVIDER", settings.PROVIDER_OPENAI_CODEX)
+    assert settings.provider_default({}) == settings.PROVIDER_OPENAI_CODEX
+
 
 def test_startup_choice_does_not_prompt_on_first_run(monkeypatch):
     _clear_provider_env(monkeypatch)
@@ -92,6 +97,21 @@ def test_ollama_auth_label_distinguishes_cloud_and_local(monkeypatch):
 
     assert cloud == "missing OLLAMA_API_KEY"
     assert local == "local Ollama"
+
+
+def test_openai_codex_auth_label_uses_chatgpt_oauth(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    missing = main._provider_auth_label(settings.PROVIDER_OPENAI_CODEX, _args(), {}, None)
+    present = main._provider_auth_label(
+        settings.PROVIDER_OPENAI_CODEX,
+        _args(),
+        {},
+        main.auth.Credential(kind="oauth", token="token", email="me@example.com"),
+    )
+
+    assert missing == "missing ChatGPT OAuth"
+    assert present == "ChatGPT OAuth (me@example.com)"
 
 
 def test_ollama_auth_label_uses_runtime_local_transport_for_cloud_model(monkeypatch):
@@ -135,6 +155,21 @@ def test_ollama_model_choices_match_host():
     assert "glm-5.1:cloud" not in local
     assert "glm-5.1:cloud" in cloud
     assert "gpt-oss:20b" not in cloud
+
+
+def test_openai_codex_model_default_and_choices(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    seen: list[str] = []
+
+    def fake_pick(label, options, default):
+        seen.extend(value for value, _ in options)
+        return settings.OPENAI_CODEX_MODEL
+
+    monkeypatch.setattr(main, "_pick", fake_pick)
+
+    assert settings.model_default(settings.PROVIDER_OPENAI_CODEX, {}) == settings.OPENAI_CODEX_MODEL
+    assert main._pick_model(settings.PROVIDER_OPENAI_CODEX, {}) == settings.OPENAI_CODEX_MODEL
+    assert settings.OPENAI_CODEX_MODEL in seen
 
 
 def test_ollama_picker_offers_local_and_cloud_models(monkeypatch):

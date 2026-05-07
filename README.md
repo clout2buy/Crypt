@@ -39,7 +39,7 @@ with `ollama serve`; no API key or Anthropic login is needed for localhost.
 
 ## Providers
 
-Crypt has three first-class transports. All three use the same internal
+Crypt has four first-class transports. All four use the same internal
 message format (Anthropic-style content blocks), so switching providers
 mid-session via `/model` is a one-keystroke operation.
 
@@ -65,6 +65,19 @@ python main.py --provider openai --model gpt-5
 
 Works with Together, Fireworks, LM Studio, vLLM, and any other server that
 serves Chat Completions.
+
+### ChatGPT OAuth (OpenAI Codex)
+
+```bash
+python main.py login --provider openai-codex
+python main.py --provider openai-codex --model gpt-5-codex
+```
+
+This uses the ChatGPT/Codex OAuth flow and talks to
+`https://chatgpt.com/backend-api/codex/responses` with the ChatGPT bearer
+token plus `ChatGPT-Account-ID`. It is separate from `OPENAI_API_KEY`; use
+the plain `openai` provider when you want Platform API billing or a
+compatible Chat Completions endpoint.
 
 ### Ollama (local or cloud)
 
@@ -310,7 +323,7 @@ Crypt auto-loads project guidance from the workspace and parents:
 | Env var | Default | Effect |
 |---|---|---|
 | `CRYPT_ROOT` | saved or cwd | Workspace root for tools |
-| `CRYPT_PROVIDER` | saved or `ollama` | `anthropic`, `openai`, or `ollama` |
+| `CRYPT_PROVIDER` | saved or `ollama` | `anthropic`, `openai`, `openai-codex`, or `ollama` |
 | `CRYPT_APPROVAL` | `edits` | `normal`, `edits`, or `all` |
 | `CRYPT_REASONING_STALL_SECONDS` | 45 | Abort hidden reasoning-only streams after this many seconds; 0 disables |
 | `CRYPT_NO_ANIMATION` | unset | Disables the startup splash |
@@ -318,10 +331,14 @@ Crypt auto-loads project guidance from the workspace and parents:
 | `CRYPT_WEB_ALLOWED_HOSTS` | unset | Comma-separated allowlist |
 | `CRYPT_WEB_DENIED_HOSTS` | unset | Comma-separated denylist |
 | `ANTHROPIC_MODEL` | `claude-opus-4-7` | Default Anthropic model |
-| `ANTHROPIC_MAX_TOKENS` | 4096 | Anthropic response cap |
-| `ANTHROPIC_THINKING_BUDGET` | 512 | Anthropic thinking budget |
+| `ANTHROPIC_MAX_TOKENS` | 8000 | Anthropic response cap |
+| `ANTHROPIC_THINKING_BUDGET` | 4000 | Anthropic thinking budget |
 | `OPENAI_BASE_URL` | api.openai.com | Override for compat servers |
-| `OPENAI_MAX_TOKENS` | 4096 | OpenAI response cap |
+| `OPENAI_MAX_TOKENS` | 8000 | OpenAI response cap |
+| `OPENAI_CODEX_MODEL` | `gpt-5-codex` | Default ChatGPT OAuth Codex model |
+| `OPENAI_CODEX_BASE_URL` | chatgpt.com/backend-api | Override Codex backend base |
+| `OPENAI_CODEX_MAX_TOKENS` | 32000 | ChatGPT OAuth Codex response cap |
+| `OPENAI_CODEX_REASONING_EFFORT` | unset | Optional Codex Responses reasoning effort |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama URL (auto-normalized) |
 | `OLLAMA_API_KEY` | `ollama` | Bearer token; only required for cloud/custom auth |
 | `OLLAMA_MAX_TOKENS` | 16384 | Output budget |
