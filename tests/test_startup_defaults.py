@@ -28,6 +28,10 @@ def _args(**overrides):
         "cwd": None,
         "ollama_host": None,
         "no_picker": False,
+        "no_thinking": False,
+        "show_thinking": False,
+        "max_tokens": None,
+        "thinking_budget": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -113,6 +117,31 @@ def test_saved_cloud_ollama_with_key_stays_cloud(monkeypatch):
 
     assert settings.ollama_host(saved=saved) == "https://ollama.com"
     assert settings.model_default(settings.PROVIDER_OLLAMA, saved) == "glm-5.1:cloud"
+
+
+def test_ollama_model_choices_match_host():
+    local = settings.ollama_models_for_host("http://localhost:11434")
+    cloud = settings.ollama_models_for_host("https://ollama.com")
+
+    assert "gpt-oss:20b" in local
+    assert "glm-5.1:cloud" not in local
+    assert "glm-5.1:cloud" in cloud
+    assert "gpt-oss:20b" not in cloud
+
+
+def test_cloud_model_is_replaced_for_local_host():
+    assert settings.compatible_ollama_model("glm-5.1:cloud", "http://localhost:11434") == "gpt-oss:20b"
+    assert settings.compatible_ollama_model("glm-5.1:cloud", "https://ollama.com") == "glm-5.1:cloud"
+
+
+def test_ollama_provider_does_not_think_unless_thinking_is_shown(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    provider = main._provider(_args(), {}, settings.PROVIDER_OLLAMA)
+    shown_provider = main._provider(_args(show_thinking=True), {}, settings.PROVIDER_OLLAMA)
+
+    assert provider._think is False
+    assert shown_provider._think is True
 
 
 def test_doctor_reports_missing_ollama_cloud_key(monkeypatch, tmp_path):

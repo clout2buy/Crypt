@@ -83,7 +83,10 @@ Cloud calls are opt-in: set `OLLAMA_HOST=https://ollama.com` and
 Crypt also defaults to `auto-edits` approval: file writes, edits, and
 opening generated files run without a second prompt, while shell commands
 and destructive actions still require approval. Use `/safe` or set
-`CRYPT_APPROVAL=normal` if you want prompts for every edit.
+`CRYPT_APPROVAL=normal` if you want prompts for every edit. Ollama
+thinking is not requested unless you launch with `--show-thinking`, so
+local models reach tool calls faster instead of spending minutes in a
+hidden reasoning phase.
 
 Crypt uses the official `anthropic` SDK pointed at Ollama's
 Anthropic-compatible `/v1/messages` endpoint — the same surface Ollama
@@ -313,7 +316,7 @@ Crypt auto-loads project guidance from the workspace and parents:
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama URL (auto-normalized) |
 | `OLLAMA_API_KEY` | `ollama` | Bearer token; only required for cloud/custom auth |
 | `OLLAMA_MAX_TOKENS` | 16384 | Output budget |
-| `OLLAMA_THINKING_BUDGET` | 2048 | Reasoning budget; 0 disables |
+| `OLLAMA_THINKING_BUDGET` | 0 | Reasoning budget; 0 disables |
 | `OLLAMA_TIMEOUT` | 600 | Request timeout in seconds |
 
 ---

@@ -58,19 +58,21 @@ OPENAI_MODELS = (
 
 OLLAMA_MODEL = "gpt-oss:20b"
 OLLAMA_HOST = "http://localhost:11434"
-OLLAMA_MODELS = (
+OLLAMA_LOCAL_MODELS = (
     "gpt-oss:20b",
     "gpt-oss:120b",
     "qwen2.5-coder:7b",
     "qwen2.5-coder:14b",
     "qwen2.5-coder:32b",
     "deepseek-coder-v2:16b",
+    "kimi-k2:latest",
+)
+OLLAMA_CLOUD_MODELS = (
     "gpt-oss:120b-cloud",
     "gpt-oss:20b-cloud",
     "qwen3-coder:480b-cloud",
     "qwen3-coder:30b-cloud",
     "deepseek-v4-pro:cloud",
-    "kimi-k2:latest",
     "kimi-k2:cloud",
     "kimi-k2.6:cloud",
     "deepseek-v3.1:cloud",
@@ -78,6 +80,7 @@ OLLAMA_MODELS = (
     "glm-5.1:cloud",
     "llama3.3:70b-cloud",
 )
+OLLAMA_MODELS = OLLAMA_LOCAL_MODELS + OLLAMA_CLOUD_MODELS
 
 CRYPT_VERSION = "0.3.0"
 CRYPT_IDENTITY = "You are Crypt, a local-first software engineering agent."
@@ -214,6 +217,16 @@ def is_local_host(host: str) -> bool:
 
 def is_ollama_cloud_model(model: str) -> bool:
     return model.endswith(":cloud") or model.endswith("-cloud")
+
+
+def ollama_models_for_host(host: str) -> tuple[str, ...]:
+    return OLLAMA_CLOUD_MODELS if is_ollama_cloud_host(host) else OLLAMA_LOCAL_MODELS
+
+
+def compatible_ollama_model(model: str, host: str) -> str:
+    if is_local_host(host) and is_ollama_cloud_model(model):
+        return OLLAMA_MODEL
+    return model
 
 
 def client_host(host: str) -> str:

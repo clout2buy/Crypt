@@ -114,9 +114,8 @@ def main() -> int:
                 ],
                 getattr(active_provider, "name", provider_name),
             )
-            model_override = _pick_model(provider_name, saved)
-
             host = settings.ollama_host(args.ollama_host, saved)
+            model_override = _pick_model(provider_name, saved, host=host)
             if (
                 provider_name == settings.PROVIDER_OLLAMA
                 and settings.is_ollama_cloud_host(host)
@@ -230,8 +229,8 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
         if not os.getenv("OPENAI_API_KEY"):
             ui.info("OPENAI_API_KEY is not set; set it before using OpenAI")
     else:
-        model = args.model or _pick_model(provider, saved)
         host = settings.client_host(args.ollama_host or saved.get("ollama_host") or settings.OLLAMA_HOST)
+        model = args.model or _pick_model(provider, saved, host=host)
         values = {
             "workspace": str(workspace),
             "provider": provider,
@@ -267,7 +266,11 @@ def _startup_choice(saved: dict, args: argparse.Namespace, skip: bool = False) -
         ],
         provider_name,
     )
-    model_override = _pick_model(provider_name, saved)
+    model_override = _pick_model(
+        provider_name,
+        saved,
+        host=settings.ollama_host(args.ollama_host, saved),
+    )
     return provider_name, model_override
 
 
@@ -296,13 +299,14 @@ def _pick(label: str, options: list[tuple[str, str]], default: str) -> str:
     return ui.splash_choice(label, options, default_idx)
 
 
-def _pick_model(provider: str, saved: dict) -> str:
+def _pick_model(provider: str, saved: dict, *, host: str | None = None) -> str:
     if provider == settings.PROVIDER_ANTHROPIC:
         models = settings.ANTHROPIC_MODELS
     elif provider == settings.PROVIDER_OPENAI:
         models = settings.OPENAI_MODELS
     else:
-        models = settings.OLLAMA_MODELS
+        host = host or settings.ollama_host(saved=saved)
+        models = settings.ollama_models_for_host(host)
     default = settings.model_default(provider, saved)
     options = [(m, m) for m in models]
     custom_value = "__custom__"
@@ -375,10 +379,13 @@ def _provider(
             base_url=settings.openai_base_url(saved),
         )
 
+    host = settings.ollama_host(args.ollama_host, saved)
+    model = model_override or args.model or settings.model_default(provider_name, saved)
+    model = settings.compatible_ollama_model(model, host)
     return OllamaProvider(
-        model=model_override or args.model or settings.model_default(provider_name, saved),
-        host=settings.ollama_host(args.ollama_host, saved),
-        think=not args.no_thinking,
+        model=model,
+        host=host,
+        think=(not args.no_thinking and args.show_thinking),
     )
 
 

@@ -197,14 +197,18 @@ def test_stream_turn_sends_anthropic_tool_shape(monkeypatch):
     assert "function" not in sent["tools"][0]
 
 
-def test_stream_turn_enables_thinking_by_default(monkeypatch):
-    """Thinking should be on by default so users see the model's reasoning."""
+def test_stream_turn_omits_thinking_by_default(monkeypatch):
+    """Ollama thinking defaults off so models reach tool calls faster."""
     provider, fake = _make_provider([{"type": "message_stop"}], monkeypatch)
     list(provider.stream_turn(messages=[], tools=[], system=""))
-    sent = fake.messages.calls[0]
-    assert "thinking" in sent
-    assert sent["thinking"]["type"] == "enabled"
-    assert sent["thinking"]["budget_tokens"] == 2048
+    assert "thinking" not in fake.messages.calls[0]
+
+
+def test_stream_turn_enables_thinking_when_budget_is_set(monkeypatch):
+    monkeypatch.setenv("OLLAMA_THINKING_BUDGET", "2048")
+    provider, fake = _make_provider([{"type": "message_stop"}], monkeypatch)
+    list(provider.stream_turn(messages=[], tools=[], system=""))
+    assert fake.messages.calls[0]["thinking"] == {"type": "enabled", "budget_tokens": 2048}
 
 
 def test_stream_turn_omits_thinking_when_budget_is_zero(monkeypatch):

@@ -745,9 +745,9 @@ class OllamaProvider:
         # `thinking` content block when this is configured. Set to 0 in
         # the env to disable for non-thinking models.
         try:
-            self._thinking_budget = int(os.getenv("OLLAMA_THINKING_BUDGET", "2048"))
+            self._thinking_budget = int(os.getenv("OLLAMA_THINKING_BUDGET", "0"))
         except ValueError:
-            self._thinking_budget = 2048
+            self._thinking_budget = 0
         # Anthropic's API rejects budget >= max_tokens; leave room for the
         # actual response.
         if self._thinking_budget >= self._max_tokens:

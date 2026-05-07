@@ -460,8 +460,12 @@ def _stream_one_turn(
         for event in provider.stream_turn(messages, tools, system_prompt):
             if isinstance(event, ThinkingDelta):
                 if render:
-                    ui.activity("receiving reasoning stream")
-                    ui.stream_delta("reasoning", event.text)
+                    if show_thinking:
+                        ui.activity("receiving reasoning stream")
+                        ui.stream_delta("reasoning", event.text)
+                    else:
+                        ui.activity("model planning before next action")
+                        ui.stream_delta("internal", event.text)
                 if not show_thinking:
                     continue
                 if not thinking_open:
