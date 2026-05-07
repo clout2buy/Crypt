@@ -37,10 +37,8 @@ def extract_text(message: dict) -> str:
 
 
 def creation_requested(messages: list[dict]) -> bool:
-    for text in _recent_textual_user_messages(messages):
-        if _ARTIFACT_ACTION_RE.search(text) and _ARTIFACT_TARGET_RE.search(text):
-            return True
-    return False
+    text = _last_real_user_text(messages)
+    return bool(text and _ARTIFACT_ACTION_RE.search(text) and _ARTIFACT_TARGET_RE.search(text))
 
 
 def should_retry_text_only(messages: list[dict], assistant_msg: dict) -> bool:
@@ -65,7 +63,7 @@ def should_retry_empty(messages: list[dict], assistant_msg: dict) -> bool:
 
 
 def tool_retry_message(messages: list[dict]) -> dict:
-    request = _last_textual_user_message(messages)
+    request = _last_real_user_text(messages) or _last_textual_user_message(messages)
     wants_open = bool(re.search(r"\b(open|launch|show)\b", request, re.I))
     open_instruction = (
         " After write_file succeeds, call open_file for the generated file."
@@ -86,7 +84,7 @@ def tool_retry_message(messages: list[dict]) -> dict:
 
 
 def empty_retry_message(messages: list[dict]) -> dict:
-    request = _last_textual_user_message(messages)
+    request = _last_real_user_text(messages) or _last_textual_user_message(messages)
     wants_open = bool(re.search(r"\b(open|launch|show)\b", request, re.I))
     open_instruction = (
         " After write_file succeeds, call open_file for the generated file."
@@ -108,7 +106,7 @@ def empty_retry_message(messages: list[dict]) -> dict:
 
 
 def reasoning_stall_retry_message(messages: list[dict]) -> dict:
-    request = _last_textual_user_message(messages)
+    request = _last_real_user_text(messages) or _last_textual_user_message(messages)
     wants_open = bool(re.search(r"\b(open|launch|show)\b", request, re.I))
     open_instruction = (
         " After write_file succeeds, call open_file for the generated file."
@@ -130,7 +128,7 @@ def reasoning_stall_retry_message(messages: list[dict]) -> dict:
 
 
 def fast_lane_system_guidance(messages: list[dict]) -> str:
-    request = _last_textual_user_message(messages)
+    request = _last_real_user_text(messages) or _last_textual_user_message(messages)
     return (
         "# Current Turn Constraint\n"
         "The user asked Crypt to create a file/artifact. Your next assistant message "
@@ -198,17 +196,21 @@ def _last_textual_user_message(messages: list[dict]) -> str:
     return ""
 
 
-def _recent_textual_user_messages(messages: list[dict], limit: int = 3) -> list[str]:
-    out: list[str] = []
+def _last_real_user_text(messages: list[dict]) -> str:
     for msg in reversed(messages):
         if msg.get("role") != "user":
             continue
         text = extract_text(msg)
-        if text:
-            out.append(text)
-            if len(out) >= limit:
-                break
-    return out
+        if not text or text.startswith("Crypt harness correction:"):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "tool_result"
+            for block in content
+        ):
+            continue
+        return text
+    return ""
 
 
 def _last_real_user_index(messages: list[dict]) -> int:
