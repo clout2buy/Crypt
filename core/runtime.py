@@ -28,6 +28,8 @@ APPROVAL_MODES = (APPROVAL_NORMAL, APPROVAL_EDITS, APPROVAL_ALL)
 if _approval_mode not in APPROVAL_MODES:
     _approval_mode = APPROVAL_EDITS
 AUTO_EDIT_TOOLS = {
+    "bash",
+    "bash_start",
     "edit_file",
     "write_file",
     "open_file",
@@ -115,7 +117,7 @@ def approval_mode() -> str:
 
 def approval_label() -> str:
     if _approval_mode == APPROVAL_EDITS:
-        return "auto-edits"
+        return "auto-work"
     if _approval_mode == APPROVAL_ALL:
         return "yolo-all"
     return "manual"

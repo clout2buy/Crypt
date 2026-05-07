@@ -95,10 +95,10 @@ through your local `ollama serve` transport with no Crypt-side API key. If
 you explicitly point `OLLAMA_HOST` or `--ollama-host` at `https://ollama.com`,
 then Ollama Cloud requires `OLLAMA_API_KEY`; Anthropic OAuth is still not used.
 
-Crypt also defaults to `auto-edits` approval: file writes, edits, and
-opening generated files run without a second prompt, while shell commands
-and destructive actions still require approval. Use `/safe` or set
-`CRYPT_APPROVAL=normal` if you want prompts for every edit. Ollama
+Crypt also defaults to `auto-work` approval: file writes, edits, opening
+generated files, and non-danger shell commands run without a second prompt.
+Destructive shell commands still require approval. Use `/safe` or set
+`CRYPT_APPROVAL=normal` if you want prompts for every edit or shell action. Ollama
 thinking is not requested unless you launch with `--show-thinking`, so
 local models reach tool calls faster instead of spending minutes in a
 hidden reasoning phase. If a provider still sends reasoning for too long
@@ -185,6 +185,10 @@ returned so the model can grep or tail without re-running. When a command
 fails with no captured output (Windows `2>nul`, missing POSIX tools),
 Crypt adds a `[hint: ...]` line diagnosing the likely cause.
 
+On Windows, `bash` runs through `cmd.exe`. Crypt translates the common
+single-heredoc stdin form (`python - <<'PY' ... PY`) so multiline Python
+does not fail with `<< was unexpected at this time`.
+
 ### Multi-file edits
 
 `multi_edit` applies edits across files atomically. All edits are
@@ -239,7 +243,7 @@ Three approval modes, switchable mid-session:
 | Mode | Trigger | What it does |
 |---|---|---|
 | Manual | default | Every shell or edit asks once |
-| Auto-edits | `/yolo` | File edits skip prompts; shell still asks |
+| Auto-work | `/yolo` | File edits and non-danger shell commands skip prompts |
 | YOLO-all | `/yolo all` | All tool prompts bypassed |
 | Safe | `/safe` | Return to manual |
 

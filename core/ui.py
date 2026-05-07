@@ -884,7 +884,7 @@ def user_prompt(yolo: bool = False, approval: str = "manual") -> str:
 
     if yolo or approval == "yolo-all":
         bg, fg = ERR_BG, ERR
-    elif approval == "auto-edits":
+    elif approval in {"auto-edits", "auto-work"}:
         bg, fg = WARN_BG, WARN
     else:
         bg, fg = INPUT_BG, ACCENT
@@ -1349,9 +1349,9 @@ def footer(
     t.append("STA", style=MUTED)
     t.append(" · ", style=FAINT)
     t.append(friendly, style=MUTED)
-    if approval == "auto-edits":
+    if approval in {"auto-edits", "auto-work"}:
         t.append(" · ", style=FAINT)
-        t.append(" AUTO-EDITS ", style=f"bold {WARN} {WARN_BG}")
+        t.append(" AUTO-WORK ", style=f"bold {WARN} {WARN_BG}")
     elif yolo or approval == "yolo-all":
         t.append(" · ", style=FAINT)
         t.append(" YOLO ", style=f"bold {ERR} {ERR_BG}")

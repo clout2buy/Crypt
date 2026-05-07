@@ -56,6 +56,21 @@ def test_diagnose_unknown_verb_no_output():
     assert "PATH" in hint or "found" in hint
 
 
+def test_simple_heredoc_is_converted_to_stdin():
+    cmd, stdin = bash._prepare_command("python - <<'PY'\nprint('hi')\nPY")
+
+    assert cmd == "python -"
+    assert stdin == "print('hi')\n"
+
+
+def test_diagnose_double_escaped_windows_path(monkeypatch):
+    monkeypatch.setattr(bash.os, "name", "nt")
+
+    hint = bash._diagnose_failure(r'dir "C:\\Users\\Clout\\Downloads"', returncode=1, stdout="", stderr="")
+
+    assert "single backslashes" in hint
+
+
 @pytest.mark.skipif(os.name != "nt", reason="POSIX-on-Windows hint is Windows-only")
 def test_diagnose_posix_command_on_windows():
     """If wc isn't installed, the hint should mention it AND suggest the

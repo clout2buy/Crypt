@@ -4,7 +4,7 @@ import os
 
 from core import file_state
 
-from .fs import clip, is_text_file, rel, resolve
+from .fs import clip, is_text_file, rel, resolve_read
 from .types import Tool
 
 
@@ -21,7 +21,7 @@ def _max_bytes() -> int:
 
 
 def run(args: dict) -> str:
-    path = resolve(args["path"])
+    path = resolve_read(args["path"])
     if not path.exists():
         raise FileNotFoundError(rel(path))
     if not path.is_file():
@@ -93,7 +93,8 @@ UTF-8 text only.
 TOOL = Tool(
     "read_file",
     (
-        "Read a UTF-8 text file inside the workspace. Returns line-numbered "
+        "Read a UTF-8 text file. Relative paths resolve inside the workspace; "
+        "absolute paths may point anywhere on disk. Returns line-numbered "
         "content. Pass `offset` (1-indexed start line) and `limit` (line count) "
         "to read a slice instead of the whole file. Refuses to read binary files."
     ),

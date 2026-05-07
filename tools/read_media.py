@@ -2,28 +2,47 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
 
-from .fs import rel, resolve
+from .fs import clip, rel, resolve_read
 from .types import Tool
 
 
 MAX_MEDIA_BYTES = 8 * 1024 * 1024
+MAX_PDF_TEXT_CHARS = 220_000
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 DOCUMENT_TYPES = {"application/pdf"}
 
 
 def run(args: dict):
-    path = resolve(args["path"])
+    path = resolve_read(args["path"])
     if not path.exists():
         raise FileNotFoundError(rel(path))
     if not path.is_file():
         raise IsADirectoryError(rel(path))
     data = path.read_bytes()
-    if len(data) > MAX_MEDIA_BYTES:
-        raise ValueError(f"media file too large ({len(data)} bytes, max {MAX_MEDIA_BYTES})")
     media_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-    encoded = base64.b64encode(data).decode("ascii")
     metadata = f"media: {rel(path)}\ntype: {media_type}\nbytes: {len(data)}"
+    text_blocks = [{"type": "text", "text": metadata}]
+
+    if media_type in DOCUMENT_TYPES:
+        pdf_text = _extract_pdf_text(path)
+        if pdf_text:
+            text_blocks.append({
+                "type": "text",
+                "text": "\n\n--- extracted PDF text ---\n" + clip(pdf_text, MAX_PDF_TEXT_CHARS),
+            })
+
+    if len(data) > MAX_MEDIA_BYTES:
+        if media_type in DOCUMENT_TYPES and len(text_blocks) > 1:
+            return {
+                "__crypt_tool_result__": True,
+                "display": metadata + "\nembedded_media: skipped; file exceeds native media cap",
+                "content": text_blocks,
+            }
+        raise ValueError(f"media file too large ({len(data)} bytes, max {MAX_MEDIA_BYTES})")
+
+    encoded = base64.b64encode(data).decode("ascii")
     if media_type in IMAGE_TYPES:
         block = {
             "type": "image",
@@ -47,11 +66,29 @@ def run(args: dict):
     return {
         "__crypt_tool_result__": True,
         "display": metadata,
-        "content": [
-            {"type": "text", "text": metadata},
-            block,
-        ],
+        "content": [*text_blocks, block],
     }
+
+
+def _extract_pdf_text(path) -> str:
+    if os.getenv("CRYPT_PDF_TEXT", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return ""
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return ""
+
+    try:
+        reader = PdfReader(str(path))
+        chunks: list[str] = []
+        for idx, page in enumerate(reader.pages, 1):
+            text = page.extract_text() or ""
+            text = text.strip()
+            if text:
+                chunks.append(f"--- PAGE {idx} ---\n{text}")
+        return "\n\n".join(chunks)
+    except Exception:
+        return ""
 
 
 def summary(args: dict) -> str:
@@ -60,7 +97,11 @@ def summary(args: dict) -> str:
 
 TOOL = Tool(
     "read_media",
-    "Read an image or PDF inside the workspace as a native model-visible media block.",
+    (
+        "Read an image or PDF. Relative paths resolve inside the workspace; "
+        "absolute paths may point anywhere on disk. PDFs include extracted text "
+        "when pypdf is installed."
+    ),
     {
         "type": "object",
         "properties": {

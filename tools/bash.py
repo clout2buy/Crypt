@@ -62,11 +62,13 @@ _GLOB_HINT_RE = re.compile(r"[*?]")
 
 def run(args: dict) -> str:
     command = args["command"]
+    run_command, stdin = _prepare_command(command)
     try:
         r = subprocess.run(
-            command,
+            run_command,
             shell=True,
             cwd=root(),
+            input=stdin,
             capture_output=True,
             encoding="utf-8",
             errors="replace",
@@ -99,6 +101,55 @@ def run(args: dict) -> str:
     return body
 
 
+def _prepare_command(command: str) -> tuple[str, str | None]:
+    heredoc = _extract_simple_heredoc(command)
+    if heredoc is not None:
+        return heredoc
+    return command, None
+
+
+def _extract_simple_heredoc(command: str) -> tuple[str, str] | None:
+    """Translate the common POSIX heredoc stdin pattern for Windows cmd.exe.
+
+    Models often emit:
+
+        python - <<'PY'
+        ...
+        PY
+
+    `cmd.exe` treats `<<` as invalid syntax. For a single heredoc on the
+    first line, strip the heredoc operator and pass the body as stdin. This
+    preserves useful multiline Python without changing normal shell behavior.
+    """
+    normalized = command.replace("\r\n", "\n")
+    if "\n" not in normalized or "<<" not in normalized:
+        return None
+
+    first, rest = normalized.split("\n", 1)
+    match = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][\w.-]*)\1\s*$", first)
+    if not match:
+        return None
+
+    tag = match.group(2)
+    prefix = first[:match.start()].rstrip()
+    if not prefix:
+        return None
+
+    lines = rest.split("\n")
+    end_idx = None
+    for idx in range(len(lines) - 1, -1, -1):
+        if lines[idx].strip() == tag:
+            end_idx = idx
+            break
+    if end_idx is None:
+        return None
+
+    body = "\n".join(lines[:end_idx])
+    if body and not body.endswith("\n"):
+        body += "\n"
+    return prefix, body
+
+
 def _diagnose_failure(command: str, returncode: int, stdout: str, stderr: str) -> str:
     """Best-effort hint when the failure has no useful output. Always returns
     a string ('' if nothing helpful to say) — never raises."""
@@ -119,6 +170,12 @@ def _diagnose_failure(command: str, returncode: int, stdout: str, stderr: str) -
                     f"Wrap the command in `bash -c '...'` if Git Bash is on PATH, "
                     f"or use PowerShell: {_POSIX_HINTS[verb]}"
                 )
+
+        if os.name == "nt" and re.search(r"[A-Za-z]:\\{2,}", command):
+            return (
+                "Windows shell paths should use single backslashes. JSON escaping "
+                "is not shell syntax; use C:\\Users\\Name\\file, not C:\\\\Users\\\\Name\\\\file."
+            )
 
         # Generic empty-output diagnosis.
         if not captured:
@@ -227,6 +284,9 @@ For shell work. Crypt classifies commands at runtime:
 On Windows, `bash` runs `cmd.exe`. cmd.exe DOES NOT expand globs (`*`, `?`)
 the way POSIX shells do, and POSIX commands like `wc`, `cat`, `head`,
 `tail`, `sed`, `awk`, `which`, `ps`, `df`, `du` are usually NOT installed.
+Crypt supports the common single-heredoc stdin pattern (`python - <<'PY'`)
+as a compatibility shim, but prefer short `python -c "..."` commands or
+write a temporary script when quoting gets complex.
 Prefer:
 - `dir` / `type` / `findstr` / `where` (cmd built-ins)
 - `Get-ChildItem` / `Get-Content` / `Select-String` / `Measure-Object`

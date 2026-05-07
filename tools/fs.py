@@ -1,8 +1,9 @@
 """Workspace filesystem helpers shared across tools.
 
 Workspace root comes from the CRYPT_ROOT env var (set by core.runtime).
-Every path-taking tool funnels through `resolve()` which refuses paths
-that escape the workspace.
+Mutating and scanning tools funnel through `resolve()` which refuses paths
+that escape the workspace. Explicit read-only tools can use `resolve_read()`
+so user-supplied absolute files are usable without switching workspace.
 """
 from __future__ import annotations
 
@@ -57,7 +58,7 @@ def root() -> Path:
 
 def resolve(path: str) -> Path:
     base = root()
-    p = Path(path)
+    p = Path(path).expanduser()
     p = p if p.is_absolute() else base / p
     p = p.resolve()
     try:
@@ -65,6 +66,19 @@ def resolve(path: str) -> Path:
     except ValueError as e:
         raise PermissionError(f"path outside workspace: {path}") from e
     return p
+
+
+def resolve_read(path: str) -> Path:
+    """Resolve a read-only path.
+
+    Relative paths stay anchored under the current workspace. Absolute paths
+    and `~` paths are allowed because users often hand Crypt a one-off PDF,
+    image, log, or config file outside the active project.
+    """
+    p = Path(path).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return resolve(path)
 
 
 def rel(path: Path) -> str:

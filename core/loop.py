@@ -1530,7 +1530,7 @@ def _handle_yolo(command: str) -> None:
 
     label = runtime.approval_label()
     if mode == runtime.APPROVAL_EDITS:
-        ui.info("approval: auto-edits (file edits skip prompts; shell still asks)")
+        ui.info("approval: auto-work (non-danger shell and file edits skip prompts)")
     elif mode == runtime.APPROVAL_ALL:
         ui.info("approval: yolo-all (all tool prompts bypassed)")
     else:
