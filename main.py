@@ -136,7 +136,7 @@ def main() -> int:
             ui.status_panel({
                 "provider": provider.name,
                 "model": provider.model,
-                "auth": _provider_auth_label(provider_name, args, saved, cred),
+                "auth": _provider_auth_label(provider_name, args, saved, cred, provider=provider),
                 "approval": runtime.approval_label(),
             })
             return provider
@@ -308,8 +308,7 @@ def _pick_model(provider: str, saved: dict, *, host: str | None = None) -> str:
     elif provider == settings.PROVIDER_OPENAI:
         models = settings.OPENAI_MODELS
     else:
-        host = host or settings.ollama_host(saved=saved)
-        models = settings.ollama_models_for_host(host)
+        models = settings.OLLAMA_MODELS
     default = settings.model_default(provider, saved)
     options = [(m, m) for m in models]
     custom_value = "__custom__"
@@ -341,13 +340,14 @@ def _provider_auth_label(
     args: argparse.Namespace | None,
     saved: dict | None,
     cred: auth.Credential | None,
+    provider=None,
 ) -> str:
     if provider_name == settings.PROVIDER_ANTHROPIC:
         return cred.kind if cred else "missing Anthropic auth"
     if provider_name == settings.PROVIDER_OPENAI:
         return "OPENAI_API_KEY" if os.getenv("OPENAI_API_KEY") else "missing OPENAI_API_KEY"
 
-    host = settings.ollama_host(getattr(args, "ollama_host", None), saved or {})
+    host = getattr(provider, "_base_url", "") or settings.ollama_host(getattr(args, "ollama_host", None), saved or {})
     if settings.is_ollama_cloud_host(host):
         return "OLLAMA_API_KEY" if os.getenv("OLLAMA_API_KEY") else "missing OLLAMA_API_KEY"
     if settings.is_local_host(host):
@@ -460,7 +460,8 @@ def _save_runtime_choice(
         values["openai_model"] = model
     else:
         values["ollama_model"] = model
-        values["ollama_host"] = settings.ollama_host(args.ollama_host, saved)
+        host = settings.ollama_host(args.ollama_host, saved)
+        values["ollama_host"] = settings.ollama_host_for_model(model, host)
     settings.update_config(**values)
 
 
@@ -475,7 +476,7 @@ def _welcome(
     ui.welcome(
         provider=provider.name,
         model=provider.model,
-        auth_kind=_provider_auth_label(provider_name, args, saved, cred),
+        auth_kind=_provider_auth_label(provider_name, args, saved, cred, provider=provider),
         auth_email=cred.email if provider_name == settings.PROVIDER_ANTHROPIC and cred else None,
         auth_plan=cred.plan if provider_name == settings.PROVIDER_ANTHROPIC and cred else None,
         cwd=cwd,

@@ -94,6 +94,16 @@ def test_ollama_auth_label_distinguishes_cloud_and_local(monkeypatch):
     assert local == "local Ollama"
 
 
+def test_ollama_auth_label_uses_runtime_cloud_route(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    provider = main._provider(_args(model="ministral-3:14b-cloud"), {}, settings.PROVIDER_OLLAMA)
+
+    assert main._provider_auth_label(settings.PROVIDER_OLLAMA, _args(), {}, None, provider=provider) == (
+        "missing OLLAMA_API_KEY"
+    )
+
+
 def test_saved_cloud_ollama_without_key_falls_back_to_local(monkeypatch):
     _clear_provider_env(monkeypatch)
     saved = {
@@ -129,6 +139,22 @@ def test_ollama_model_choices_match_host():
     assert "gpt-oss:20b" not in cloud
 
 
+def test_ollama_picker_offers_local_and_cloud_models(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    seen: list[str] = []
+
+    def fake_pick(label, options, default):
+        seen.extend(value for value, _ in options)
+        return "ministral-3:14b-cloud"
+
+    monkeypatch.setattr(main, "_pick", fake_pick)
+
+    assert main._pick_model(settings.PROVIDER_OLLAMA, {}, host="http://localhost:11434") == "ministral-3:14b-cloud"
+    assert "gpt-oss:20b" in seen
+    assert "ministral-3:14b-cloud" in seen
+    assert "kimi-k2:latest" not in seen
+
+
 def test_cloud_model_routes_to_cloud_host():
     assert settings.ollama_host_for_model("glm-5.1:cloud", "http://localhost:11434") == "https://ollama.com"
     assert settings.ollama_host_for_model("gpt-oss:20b", "https://ollama.com") == "https://ollama.com"
@@ -151,6 +177,23 @@ def test_provider_routes_cloud_model_to_cloud_host(monkeypatch):
 
     assert provider.model == "glm-5.1:cloud"
     assert provider._base_url == "https://ollama.com"
+
+
+def test_runtime_choice_saves_cloud_host_for_cloud_model(monkeypatch, tmp_path):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
+
+    main._save_runtime_choice(
+        _args(),
+        {},
+        settings.PROVIDER_OLLAMA,
+        "ministral-3:14b-cloud",
+        tmp_path,
+    )
+
+    saved = settings.load_config()
+    assert saved["ollama_model"] == "ministral-3:14b-cloud"
+    assert saved["ollama_host"] == "https://ollama.com"
 
 
 def test_doctor_reports_missing_ollama_cloud_key(monkeypatch, tmp_path):
