@@ -733,6 +733,102 @@ def test_artifact_reasoning_stall_retries_with_tool_instruction(monkeypatch, wor
     )
 
 
+def test_empty_artifact_response_retries_with_tool_instruction(monkeypatch, workspace):
+    class EmptyThenToolProvider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.seen_messages: list[list[dict]] = []
+            self.seen_system: list[str] = []
+
+        def stream_turn(self, messages, tools, system):
+            self.calls += 1
+            self.seen_messages.append(list(messages))
+            self.seen_system.append(system)
+            if self.calls == 1:
+                yield ThinkingDelta("planning")
+                yield TurnEnd(
+                    stop_reason="end_turn",
+                    message={"role": "assistant", "content": []},
+                    usage={"input_tokens": 10, "output_tokens": 3},
+                )
+                return
+            if self.calls == 2:
+                assert any(
+                    "previous response ended empty" in block.get("text", "")
+                    for msg in messages
+                    for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+                    if isinstance(block, dict)
+                )
+                yield TurnEnd(
+                    stop_reason="tool_use",
+                    message={
+                        "role": "assistant",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "stub",
+                            "input": {"x": "ok"},
+                        }],
+                    },
+                )
+                return
+            yield TurnEnd(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            )
+
+    provider = EmptyThenToolProvider()
+    runtime.configure(provider, str(workspace), session=None)
+    tool = Tool(
+        name="stub",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=lambda args: f"ran {args['x']}",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+    messages = [{"role": "user", "content": "build a single-file animated html and open it"}]
+
+    current_tokens, session_tokens = loop._run_until_done(provider, messages, 0, 0, render=False)
+
+    assert provider.calls == 3
+    assert current_tokens == 13
+    assert session_tokens == 13
+    assert provider.seen_system
+    assert "Current Turn Constraint" in provider.seen_system[0]
+    assert "must contain a write_file or edit_file tool call" in provider.seen_system[0]
+    assert not any(msg.get("role") == "assistant" and msg.get("content") == [] for msg in messages)
+    assert any(
+        block.get("type") == "tool_result" and "ran ok" in block.get("content", "")
+        for msg in messages
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        if isinstance(block, dict)
+    )
+
+
+def test_repeated_empty_artifact_response_errors(monkeypatch, workspace):
+    class AlwaysEmptyProvider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def stream_turn(self, messages, tools, system):
+            yield TurnEnd(stop_reason="end_turn", message={"role": "assistant", "content": []})
+
+    provider = AlwaysEmptyProvider()
+    runtime.configure(provider, str(workspace), session=None)
+    messages = [{"role": "user", "content": "build a single-file animated html and open it"}]
+
+    with pytest.raises(RuntimeError, match="empty artifact response after retry"):
+        loop._run_until_done(provider, messages, 0, 0, render=False)
+
+    assert not any(msg.get("role") == "assistant" and msg.get("content") == [] for msg in messages)
+
+
 class _TextThenToolProvider:
     name = "fake"
     model = "fake-model"

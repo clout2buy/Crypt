@@ -291,9 +291,15 @@ def _run_until_done(
         escalated_this_turn = False
         artifact_text_retry_used = False
         artifact_stall_retry_used = False
+        artifact_empty_retry_used = False
         while used < budget:
             _ensure_tool_result_pairing(messages)
-            tools = _tools_for_turn(messages, is_subagent=is_subagent)
+            artifact_fast_lane = _artifact_fast_lane_active(messages, is_subagent=is_subagent)
+            tools = _tools_for_turn(
+                messages,
+                is_subagent=is_subagent,
+                artifact_fast_lane=artifact_fast_lane,
+            )
             tracing.emit(
                 "model_turn_start",
                 turn=used + 1,
@@ -302,7 +308,14 @@ def _run_until_done(
                 subagent=is_subagent,
             )
             try:
-                end = _stream_with_retry(provider, messages, tools, loader, render=render)
+                end = _stream_with_retry(
+                    provider,
+                    messages,
+                    tools,
+                    loader,
+                    render=render,
+                    artifact_fast_lane=artifact_fast_lane,
+                )
             except ReasoningStallError:
                 if (
                     not is_subagent
@@ -326,6 +339,33 @@ def _run_until_done(
                 usage=end.usage or {},
                 subagent=is_subagent,
             )
+            if (
+                not is_subagent
+                and not _has_tool_use(end.message)
+                and artifacts.should_retry_empty(messages, end.message)
+            ):
+                if artifact_empty_retry_used:
+                    raise RuntimeError(
+                        "provider returned an empty artifact response after retry; "
+                        "try a smaller request or a different model"
+                    )
+                artifact_empty_retry_used = True
+                used += 1
+                if end.usage:
+                    turn = (
+                        end.usage.get("input_tokens", 0)
+                        + end.usage.get("output_tokens", 0)
+                    )
+                    current_tokens = turn
+                    session_tokens += turn
+                correction = artifacts.empty_retry_message(messages)
+                messages.append(correction)
+                if runtime.session():
+                    runtime.session().append({"type": "message", "message": correction})
+                tracing.emit("artifact_empty_response_retry", turn=used)
+                if render:
+                    ui.info("model returned an empty artifact response; retrying with immediate file-tool instruction")
+                continue
             messages.append(end.message)
             if runtime.session() and not is_subagent:
                 runtime.session().record_message(end.message)
@@ -471,6 +511,7 @@ def _stream_one_turn(
     loader: ui.Loader,
     *,
     render: bool = True,
+    artifact_fast_lane: bool = False,
 ) -> TurnEnd:
     show_thinking = runtime.show_thinking() if render else False
     thinking_open = False
@@ -498,6 +539,7 @@ def _stream_one_turn(
             model=getattr(provider, "model", "model"),
             cwd=runtime.cwd(),
             tool_guidance=REGISTRY.prompts(only={str(tool.get("name", "")) for tool in tools}),
+            turn_guidance=artifacts.fast_lane_system_guidance(messages) if artifact_fast_lane else "",
         )
         for event in provider.stream_turn(messages, tools, system_prompt):
             event_at = time.monotonic()
@@ -708,9 +750,16 @@ _ARTIFACT_FAST_LANE_BLOCKED_TOOLS = {
 }
 
 
-def _tools_for_turn(messages: list[dict], *, is_subagent: bool) -> list[dict]:
+def _tools_for_turn(
+    messages: list[dict],
+    *,
+    is_subagent: bool,
+    artifact_fast_lane: bool | None = None,
+) -> list[dict]:
     tools = REGISTRY.schemas(for_subagent=is_subagent)
-    if _artifact_fast_lane_active(messages, is_subagent=is_subagent):
+    if artifact_fast_lane is None:
+        artifact_fast_lane = _artifact_fast_lane_active(messages, is_subagent=is_subagent)
+    if artifact_fast_lane:
         tools = [
             tool
             for tool in tools
@@ -1186,13 +1235,21 @@ def _stream_with_retry(
     delays: tuple[int, ...] = (2, 5, 12),
     *,
     render: bool = True,
+    artifact_fast_lane: bool = False,
 ) -> TurnEnd:
     """Run one turn; on transient failure, back off and retry. The live
     region stays running across retries — the wait just shows above it."""
     last_err: Exception | None = None
     for attempt in range(len(delays) + 1):
         try:
-            return _stream_one_turn(provider, messages, tools, loader, render=render)
+            return _stream_one_turn(
+                provider,
+                messages,
+                tools,
+                loader,
+                render=render,
+                artifact_fast_lane=artifact_fast_lane,
+            )
         except Exception as e:
             last_err = e
             if _is_rate_limit(e):

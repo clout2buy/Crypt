@@ -20,6 +20,7 @@ def build_system_prompt(
     model: str,
     cwd: str,
     tool_guidance: str,
+    turn_guidance: str = "",
 ) -> str:
     sections = [
         _identity(),
@@ -35,6 +36,7 @@ def build_system_prompt(
         _project_instructions(cwd),
         _memory(),
         _active_runtime(),
+        _turn_guidance(turn_guidance),
         _tool_guidance(tool_guidance),
     ]
     return "\n\n".join(s for s in sections if s).strip()
@@ -223,3 +225,9 @@ def _tool_guidance(tool_guidance: str) -> str:
     if not tool_guidance.strip():
         return ""
     return "# Tool Guidance\n" + tool_guidance.strip()
+
+
+def _turn_guidance(turn_guidance: str) -> str:
+    if not turn_guidance.strip():
+        return ""
+    return turn_guidance.strip()

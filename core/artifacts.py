@@ -56,6 +56,14 @@ def should_retry_text_only(messages: list[dict], assistant_msg: dict) -> bool:
     )
 
 
+def should_retry_empty(messages: list[dict], assistant_msg: dict) -> bool:
+    if not creation_requested(messages):
+        return False
+    if extract_text(assistant_msg):
+        return False
+    return not _has_tool_use(assistant_msg)
+
+
 def tool_retry_message(messages: list[dict]) -> dict:
     request = _last_textual_user_message(messages)
     wants_open = bool(re.search(r"\b(open|launch|show)\b", request, re.I))
@@ -72,6 +80,28 @@ def tool_retry_message(messages: list[dict]) -> dict:
                 "Crypt harness correction: you pasted the artifact in chat instead of using tools. "
                 "Do not paste the code again. Call write_file with a sensible filename and the full "
                 f"artifact content.{open_instruction} Keep narration minimal."
+            ),
+        }],
+    }
+
+
+def empty_retry_message(messages: list[dict]) -> dict:
+    request = _last_textual_user_message(messages)
+    wants_open = bool(re.search(r"\b(open|launch|show)\b", request, re.I))
+    open_instruction = (
+        " After write_file succeeds, call open_file for the generated file."
+        if wants_open
+        else ""
+    )
+    return {
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": (
+                "Crypt harness correction: your previous response ended empty after hidden reasoning. "
+                "Do not return an empty answer. Your next response must immediately call write_file "
+                "with a sensible filename and the complete artifact content for "
+                f"the user's request: {request!r}.{open_instruction} Keep narration minimal."
             ),
         }],
     }
@@ -99,6 +129,19 @@ def reasoning_stall_retry_message(messages: list[dict]) -> dict:
     }
 
 
+def fast_lane_system_guidance(messages: list[dict]) -> str:
+    request = _last_textual_user_message(messages)
+    return (
+        "# Current Turn Constraint\n"
+        "The user asked Crypt to create a file/artifact. Your next assistant message "
+        "must contain a write_file or edit_file tool call as the first substantive action. "
+        "Do not call todos, present_plan, ask_user, or spawn_agent first. Do not return an "
+        "empty response. Do not paste the artifact in chat. If the artifact is large, write "
+        "a complete smaller version instead of planning silently.\n"
+        f"Requested artifact: {request!r}"
+    )
+
+
 def looks_like_artifact_start(text: str) -> bool:
     if not text:
         return False
@@ -107,6 +150,13 @@ def looks_like_artifact_start(text: str) -> bool:
     if _FENCED_ARTIFACT_START_RE.search(text):
         return True
     return bool(len(text) >= 600 and re.search(r"```\w*", text))
+
+
+def _has_tool_use(msg: dict) -> bool:
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_use"
+        for block in msg.get("content", [])
+    )
 
 
 def successful_tool_names_since_last_request(messages: list[dict]) -> set[str]:
