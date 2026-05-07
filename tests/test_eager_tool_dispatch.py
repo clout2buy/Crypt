@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from core import loop, runtime
-from core.api import TextDelta, ToolUseProgress, TurnEnd, _finalized_assistant_message, _process_event
+import pytest
+
+from core.api import ThinkingDelta, TextDelta, ToolUseProgress, TurnEnd, _finalized_assistant_message, _process_event
 from tools import registry
 from tools.types import Tool
 
@@ -236,6 +238,32 @@ def test_tool_progress_detail_surfaces_partial_write_file():
     assert "demo.html" in detail
     assert "2 line(s)" in detail
     assert "chars" in detail
+
+
+def test_hidden_reasoning_stall_aborts(monkeypatch, workspace):
+    class SlowThinkingProvider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def stream_turn(self, messages, tools, system):
+            yield ThinkingDelta("still thinking")
+            yield ThinkingDelta("still thinking")
+
+    times = iter([0.0, 0.0, 46.0])
+    monkeypatch.setenv("CRYPT_REASONING_STALL_SECONDS", "45")
+    monkeypatch.setattr(loop.time, "monotonic", lambda: next(times))
+    runtime.configure(SlowThinkingProvider(), str(workspace), session=None)
+    runtime.set_show_thinking(False)
+
+    with pytest.raises(RuntimeError, match="too long in reasoning"):
+        loop._stream_one_turn(
+            SlowThinkingProvider(),
+            messages=[{"role": "user", "content": "make a file"}],
+            tools=[],
+            loader=loop._SilentLoader(),
+            render=True,
+        )
 
 
 class _TextThenToolProvider:

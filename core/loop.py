@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -444,6 +445,8 @@ def _stream_one_turn(
 ) -> TurnEnd:
     show_thinking = runtime.show_thinking() if render else False
     thinking_open = False
+    thinking_started_at: float | None = None
+    thinking_chars = 0
     text_open = False
     buffer_artifact_text = render and artifacts.creation_requested(messages)
     buffered_text: list[str] = []
@@ -459,6 +462,14 @@ def _stream_one_turn(
         )
         for event in provider.stream_turn(messages, tools, system_prompt):
             if isinstance(event, ThinkingDelta):
+                if thinking_started_at is None:
+                    thinking_started_at = time.monotonic()
+                thinking_chars += len(event.text or "")
+                if _reasoning_stalled(thinking_started_at, thinking_chars):
+                    raise RuntimeError(
+                        "provider spent too long in reasoning without producing text or tool calls. "
+                        "Retry with thinking disabled, a faster model, or a smaller request."
+                    )
                 if render:
                     if show_thinking:
                         ui.activity("receiving reasoning stream")
@@ -473,6 +484,7 @@ def _stream_one_turn(
                     thinking_open = True
                 ui.thinking_chunk(event.text)
             elif isinstance(event, ToolUseProgress):
+                thinking_started_at = None
                 if render:
                     ui.activity(f"receiving tool args: {event.name}")
                     ui.tool_progress(
@@ -482,6 +494,7 @@ def _stream_one_turn(
                         detail=_tool_progress_detail(event),
                     )
             elif isinstance(event, TextDelta):
+                thinking_started_at = None
                 if not render:
                     continue
                 ui.activity("receiving text stream")
@@ -826,6 +839,18 @@ def _stream_with_retry(
                 )
             time.sleep(wait)
     raise last_err  # pragma: no cover (unreachable)
+
+
+def _reasoning_stalled(started_at: float, chars: int) -> bool:
+    if runtime.show_thinking():
+        return False
+    try:
+        seconds = int(os.getenv("CRYPT_REASONING_STALL_SECONDS", "45"))
+    except ValueError:
+        seconds = 45
+    if seconds <= 0:
+        return False
+    return chars > 0 and (time.monotonic() - started_at) >= seconds
 
 
 def _has_tool_use(msg: dict) -> bool:

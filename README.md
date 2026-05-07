@@ -86,7 +86,9 @@ and destructive actions still require approval. Use `/safe` or set
 `CRYPT_APPROVAL=normal` if you want prompts for every edit. Ollama
 thinking is not requested unless you launch with `--show-thinking`, so
 local models reach tool calls faster instead of spending minutes in a
-hidden reasoning phase.
+hidden reasoning phase. If a provider still sends reasoning for too long
+without text or tool calls, Crypt aborts that turn after
+`CRYPT_REASONING_STALL_SECONDS` instead of appearing frozen.
 
 Crypt uses the official `anthropic` SDK pointed at Ollama's
 Anthropic-compatible `/v1/messages` endpoint — the same surface Ollama
@@ -304,6 +306,7 @@ Crypt auto-loads project guidance from the workspace and parents:
 | `CRYPT_ROOT` | saved or cwd | Workspace root for tools |
 | `CRYPT_PROVIDER` | saved or `ollama` | `anthropic`, `openai`, or `ollama` |
 | `CRYPT_APPROVAL` | `edits` | `normal`, `edits`, or `all` |
+| `CRYPT_REASONING_STALL_SECONDS` | 45 | Abort hidden reasoning-only streams after this many seconds; 0 disables |
 | `CRYPT_NO_ANIMATION` | unset | Disables the startup splash |
 | `CRYPT_WEB_ALLOW_PRIVATE` | unset | Lets `web_fetch` hit RFC1918 |
 | `CRYPT_WEB_ALLOWED_HOSTS` | unset | Comma-separated allowlist |
