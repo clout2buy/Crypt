@@ -47,9 +47,11 @@ class Registry:
             })
         return out
 
-    def prompts(self) -> str:
+    def prompts(self, *, only: set[str] | None = None) -> str:
         chunks = []
         for tool in self._ordered_tools():
+            if only is not None and tool.name not in only:
+                continue
             if tool.prompt:
                 chunks.append(f"## {tool.name}\n\n{tool.prompt.strip()}")
         return "\n\n".join(chunks)

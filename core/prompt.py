@@ -69,7 +69,8 @@ def _workflow() -> str:
     return textwrap.dedent(
         """
         # Workflow
-        - For non-trivial work, maintain todos and advance them only when reality changes.
+        - For non-trivial work, maintain todos when the todos tool is available and advance them only when reality changes.
+        - For artifact/file generation, write or edit the file before task-management tools; the live file-argument stream is the progress UI.
         - Gather context with dedicated read/search tools before shell commands.
         - Make small, reviewable edits and verify each phase before moving on.
         - For independent investigations, use subagents so raw exploration does not flood the main context.
@@ -98,7 +99,7 @@ def _tool_use() -> str:
         # Tool Use
         - Use read_file for file contents, glob/list_files for filenames, grep for content search, and edit_file/write_file for changes.
         - When the user asks you to create, build, generate, write, or implement an artifact/file (HTML page, website, app, script, component, etc.), call write_file or edit_file. Do not paste the full artifact in chat unless the user explicitly asks for a snippet/example only.
-        - For artifact/file creation requests, make the write_file/edit_file tool call your first substantive action. Avoid hidden planning, long preambles, or describing the artifact before the tool call; the terminal UI streams the tool arguments so the user can watch the file being assembled.
+        - For artifact/file creation requests, make the write_file/edit_file tool call your first substantive action. Do not call todos, present_plan, or ask_user first unless the user explicitly requested planning or clarification. Avoid hidden planning, long preambles, or describing the artifact before the tool call; the terminal UI streams the tool arguments so the user can watch the file being assembled.
         - If the user asks to open, launch, or show a generated local file, call open_file after the file has been written.
         - Do not use bash to emulate a dedicated tool unless the dedicated tool cannot do the job.
         - Parallelize independent reads/searches when the harness supports it; sequence dependent work.

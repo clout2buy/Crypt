@@ -412,6 +412,50 @@ def test_stream_gap_tracing_records_long_event_gap(monkeypatch, workspace):
     assert summaries == [{"gap_count": 1, "total_gap_seconds": 35.4}]
 
 
+def test_artifact_fast_lane_hides_task_management_before_first_write(workspace):
+    runtime.configure(_FakeProvider(), str(workspace), session=None)
+    messages = [{"role": "user", "content": "build a single-file animated html and open it"}]
+
+    offered = {tool["name"] for tool in loop._tools_for_turn(messages, is_subagent=False)}
+
+    assert "write_file" in offered
+    assert "edit_file" in offered
+    assert "open_file" in offered
+    assert "todos" not in offered
+    assert "present_plan" not in offered
+    assert "ask_user" not in offered
+
+
+def test_artifact_fast_lane_releases_after_file_write(workspace):
+    runtime.configure(_FakeProvider(), str(workspace), session=None)
+    messages = [
+        {"role": "user", "content": "build a single-file animated html and open it"},
+        {
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "write_1",
+                "name": "write_file",
+                "input": {"path": "demo.html", "content": "<html></html>"},
+            }],
+        },
+        {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "write_1",
+                "content": "created demo.html",
+                "is_error": False,
+            }],
+        },
+    ]
+
+    offered = {tool["name"] for tool in loop._tools_for_turn(messages, is_subagent=False)}
+
+    assert "todos" in offered
+    assert "present_plan" in offered
+
+
 def test_run_until_done_uses_streamed_tool_result_once(monkeypatch, workspace):
     calls: list[str] = []
 

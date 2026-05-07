@@ -278,7 +278,6 @@ def _run_until_done(
     is_subagent: bool = False,
     render: bool = True,
 ) -> tuple[int, int]:
-    tools = REGISTRY.schemas(for_subagent=is_subagent)
     loader = ui.Loader(base_tokens=current_tokens) if render else _SilentLoader()
     if render:
         loader.start()
@@ -294,6 +293,7 @@ def _run_until_done(
         artifact_stall_retry_used = False
         while used < budget:
             _ensure_tool_result_pairing(messages)
+            tools = _tools_for_turn(messages, is_subagent=is_subagent)
             tracing.emit(
                 "model_turn_start",
                 turn=used + 1,
@@ -497,7 +497,7 @@ def _stream_one_turn(
             provider_name=getattr(provider, "name", "provider"),
             model=getattr(provider, "model", "model"),
             cwd=runtime.cwd(),
-            tool_guidance=REGISTRY.prompts(),
+            tool_guidance=REGISTRY.prompts(only={str(tool.get("name", "")) for tool in tools}),
         )
         for event in provider.stream_turn(messages, tools, system_prompt):
             event_at = time.monotonic()
@@ -698,6 +698,32 @@ class _SilentLoader:
 
     def stop(self) -> None:
         return None
+
+
+_ARTIFACT_FAST_LANE_BLOCKED_TOOLS = {
+    "ask_user",
+    "present_plan",
+    "spawn_agent",
+    "todos",
+}
+
+
+def _tools_for_turn(messages: list[dict], *, is_subagent: bool) -> list[dict]:
+    tools = REGISTRY.schemas(for_subagent=is_subagent)
+    if _artifact_fast_lane_active(messages, is_subagent=is_subagent):
+        tools = [
+            tool
+            for tool in tools
+            if str(tool.get("name", "")) not in _ARTIFACT_FAST_LANE_BLOCKED_TOOLS
+        ]
+    return tools
+
+
+def _artifact_fast_lane_active(messages: list[dict], *, is_subagent: bool) -> bool:
+    if is_subagent or not artifacts.creation_requested(messages):
+        return False
+    successful = artifacts.successful_tool_names_since_last_request(messages)
+    return not successful.intersection({"write_file", "edit_file", "multi_edit"})
 
 
 def _dispatch_tool_uses(
