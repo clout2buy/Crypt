@@ -5,6 +5,7 @@ const { spawn } = require("node:child_process");
 
 const isDev = !app.isPackaged;
 const forceBuilt = process.env.CRYPT_ELECTRON_BUILT === "1";
+const useDevServer = isDev && !forceBuilt && process.argv.includes("--dev");
 const repoRoot = path.resolve(__dirname, "..");
 
 let mainWindow = null;
@@ -36,7 +37,7 @@ function createWindow() {
 
   mainWindow.setMenuBarVisibility(false);
 
-  if (isDev && !forceBuilt) {
+  if (useDevServer) {
     mainWindow.loadURL("http://127.0.0.1:5173");
   } else {
     mainWindow.loadFile(path.join(repoRoot, "app", "dist", "index.html"));

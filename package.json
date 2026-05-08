@@ -7,7 +7,7 @@
   "scripts": {
     "app:dev": "vite --host 127.0.0.1",
     "app:build": "vite build",
-    "electron:dev": "concurrently -k \"npm:app:dev\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "electron:dev": "concurrently -k \"npm:app:dev\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
     "electron:preview": "npm run app:build && electron ."
   },
   "dependencies": {
