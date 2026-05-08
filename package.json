@@ -1,0 +1,25 @@
+{
+  "name": "crypt-desktop",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Electron desktop shell for the Crypt local-first engineering harness.",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "app:dev": "vite --host 127.0.0.1",
+    "app:build": "vite build",
+    "electron:dev": "concurrently -k \"npm:app:dev\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "electron:preview": "npm run app:build && electron ."
+  },
+  "dependencies": {
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "lucide-react": "^0.562.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.2",
+    "concurrently": "^9.2.1",
+    "electron": "^39.2.7",
+    "vite": "^7.3.1",
+    "wait-on": "^9.0.3"
+  }
+}

@@ -79,6 +79,7 @@ def run_prompt(
     approval_mode: str = runtime.APPROVAL_ALL,
     show_thinking: bool = False,
     render: bool = False,
+    subagent_provider_factory=None,
 ) -> RunResult:
     """Run one prompt to completion without the interactive input loop.
 
@@ -90,10 +91,17 @@ def run_prompt(
     previous_thinking = runtime.show_thinking()
     evidence.clear()
     messages: list[dict] = session_obj.load_messages() if session_obj else []
+
+    def run_subagent(prompt, context=None, **kwargs):
+        sub_provider = provider
+        if subagent_provider_factory is not None:
+            sub_provider = subagent_provider_factory(kwargs.get("agent_type", "explorer")) or provider
+        return _run_subagent(sub_provider, prompt, context, **kwargs)
+
     runtime.configure(
         provider,
         cwd,
-        lambda prompt, context=None, **kwargs: _run_subagent(provider, prompt, context, **kwargs),
+        run_subagent,
         session=session_obj,
     )
     runtime.set_show_thinking(show_thinking)

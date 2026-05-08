@@ -103,7 +103,7 @@ def test_oauth_local_server_prints_url_when_browser_open_fails(monkeypatch):
     assert creds is flow.credentials
     assert flow.redirect_uri == "http://127.0.0.1:43210/"
     assert flow.auth_kwargs == {"prompt": "consent", "access_type": "offline"}
-    assert flow.authorization_response == "https://127.0.0.1:43210/?code=abc&state=xyz"
+    assert flow.authorization_response == "http://127.0.0.1:43210/?code=abc&state=xyz"
     assert made_servers[0].timeout == 600
     assert made_servers[0].closed is True
     assert any("browser did not open automatically" in event for event in events)

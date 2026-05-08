@@ -66,8 +66,8 @@ def main() -> int:
     p.add_argument(
         "command",
         nargs="?",
-        choices=["login", "logout", "setup", "doctor", "bench", "eval-target"],
-        help="login | logout | setup | doctor | bench | eval-target",
+        choices=["login", "logout", "setup", "doctor", "bench", "eval-target", "app-daemon"],
+        help="login | logout | setup | doctor | bench | eval-target | app-daemon",
     )
     args = p.parse_args()
 
@@ -87,6 +87,10 @@ def main() -> int:
         return _do_bench(saved, args)
     if args.command == "eval-target":
         return _do_eval_target(saved, args)
+    if args.command == "app-daemon":
+        from core.app_daemon import main as app_daemon_main
+
+        return app_daemon_main(["--cwd", args.cwd] if args.cwd else [])
     did_setup = False
     if _needs_setup(saved, args):
         saved = _do_setup(saved, args)
@@ -187,6 +191,12 @@ def main() -> int:
         return 130
     except Exception as e:
         ui.error(f"{type(e).__name__}: {e}")
+        if os.getenv("CRYPT_DEBUG_TRACEBACK"):
+            import traceback
+
+            traceback.print_exc()
+        if os.getenv("CRYPT_PAUSE_ON_ERROR") and sys.stdin.isatty():
+            input("Press Enter to exit...")
         return 1
     return 0
 
@@ -399,7 +409,7 @@ def _credential_is_usable(provider_name: str, cred: auth.Credential | None) -> b
     if provider_name == settings.PROVIDER_GEMINI:
         if os.getenv("GEMINI_API_KEY"):
             return True
-        return bool(cred and cred.token and cred.project_id)
+        return bool(cred and cred.token)
     return True
 
 
@@ -411,7 +421,7 @@ def _provider_missing_auth_message(provider_name: str) -> str:
     if provider_name == settings.PROVIDER_GEMINI:
         return (
             "Gemini auth is missing; set GEMINI_API_KEY or run "
-            "`python main.py login --provider gemini` with GEMINI_PROJECT_ID available."
+            "`python main.py login --provider gemini`."
         )
     return "provider auth is missing"
 

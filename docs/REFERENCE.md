@@ -24,6 +24,23 @@ needed to run, fork, and debug Crypt.
 Dangerous commands such as `rm -rf`, `git reset --hard`, `git clean`, and
 `git push --force` remain approval-gated.
 
+## Desktop App
+
+The Electron app is a client over the same Python Crypt engine used by the
+terminal UI. Electron starts `python -m crypt app-daemon`, sends JSON commands,
+and renders the daemon's structured events.
+
+| Command | Purpose |
+|---|---|
+| `npm install` | Install Electron/Vite/React dependencies |
+| `npm run electron:dev` | Run Vite and Electron together for development |
+| `npm run electron:preview` | Build the renderer and open the desktop shell |
+| `python -m crypt app-daemon` | Start the JSONL backend bridge directly |
+
+Set `CRYPT_PYTHON` if Electron should use a specific Python executable. Set
+`CRYPT_BACKEND_ROOT` when a packaged desktop build should run against a local
+source checkout instead of an installed `crypt-agent` Python package.
+
 ## Slash Commands
 
 | Command | Effect |

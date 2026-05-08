@@ -977,12 +977,7 @@ class GeminiProvider:
 
     def _stream_url(self) -> str:
         model = self.model.removeprefix("publishers/google/models/").removeprefix("models/")
-        if self._auth_token:
-            if not self._project_id:
-                raise RuntimeError(
-                    "Gemini OAuth requires GEMINI_PROJECT_ID so Crypt can call Vertex AI. "
-                    "Set GEMINI_PROJECT_ID to a Google Cloud project with Vertex AI enabled."
-                )
+        if self._auth_token and self._project_id:
             location = self._location or GEMINI_VERTEX_LOCATION
             host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
             return (

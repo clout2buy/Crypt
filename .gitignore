@@ -19,6 +19,12 @@ build/
 venv/
 env/
 
+# Desktop app
+node_modules/
+app/dist/
+release/
+*.tsbuildinfo
+
 # Tooling caches
 .pytest_cache/
 .mypy_cache/

@@ -87,7 +87,10 @@ GEMINI_MODELS = (
     "gemini-2.5-flash-lite",
     "gemini-3-flash-preview",
 )
-GEMINI_OAUTH_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
+GEMINI_OAUTH_SCOPES = (
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/generative-language",
+)
 
 OLLAMA_MODEL = "gpt-oss:20b"
 OLLAMA_HOST = "http://localhost:11434"

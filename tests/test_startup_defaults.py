@@ -242,6 +242,13 @@ def test_gemini_provider_uses_vertex_url_for_oauth(monkeypatch):
     )
 
 
+def test_gemini_oauth_token_without_project_is_usable(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    cred = main.auth.Credential(kind="oauth", token="token", project_id="")
+
+    assert main._credential_is_usable(settings.PROVIDER_GEMINI, cred) is True
+
+
 def test_ollama_auth_label_uses_runtime_local_transport_for_cloud_model(monkeypatch):
     _clear_provider_env(monkeypatch)
 

@@ -39,6 +39,8 @@ or workspace.
 | Command | Purpose |
 |---|---|
 | `python -m crypt` | Launch the interactive agent |
+| `npm run electron:dev` | Launch the Electron desktop app |
+| `npm run electron:preview` | Build and launch the Electron app from static assets |
 | `python -m crypt setup` | Save provider, model, and workspace defaults |
 | `python -m crypt doctor` | Validate local runtime health |
 | `python -m crypt bench --bench-list` | List benchmark tasks |

@@ -155,3 +155,31 @@ def test_gemini_oauth_scope_error_explains_relogin_and_vertex(monkeypatch):
     assert "python -m crypt login --provider gemini" in message
     assert "GEMINI_PROJECT_ID" in message
     assert "GEMINI_API_KEY" in message
+
+
+def test_gemini_oauth_without_project_id_uses_developer_api(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    provider = GeminiProvider(
+        model="gemini-2.5-flash",
+        auth_token="oauth-token",
+        project_id="",
+    )
+    provider._http = _FakeHTTP([
+        _sse({
+            "candidates": [{"content": {"parts": [{"text": "hi"}]}}],
+        }),
+    ])
+
+    list(provider.stream_turn(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+        system="sys",
+    ))
+
+    call = provider._http.calls[0]
+    assert call["url"] == (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        "models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+    )
+    assert call["headers"]["Authorization"] == "Bearer oauth-token"
+    assert "x-goog-user-project" not in call["headers"]

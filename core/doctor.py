@@ -362,7 +362,7 @@ def _check_provider_auth() -> Check:
             if stored_cred and stored_cred.project_id:
                 return Check("provider auth", True, "Gemini Google OAuth credentials available")
             if stored_cred:
-                return Check("provider auth", False, "Gemini OAuth needs GEMINI_PROJECT_ID for Vertex AI")
+                return Check("provider auth", True, "Gemini Google OAuth credentials available without Vertex project")
             if auth.resolve_gemini(include_adc=True):
                 return Check("provider auth", True, "Gemini Application Default Credentials available")
             return Check("provider auth", False, "Gemini selected; set GEMINI_API_KEY or run login --provider gemini")

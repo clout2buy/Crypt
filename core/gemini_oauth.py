@@ -47,6 +47,7 @@ def _run_oauth_local_server(flow, *, on_status=None):
         handler_class=_WSGIRequestHandler,
     )
     try:
+        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
         flow.redirect_uri = f"http://127.0.0.1:{local_server.server_port}/"
         auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
 
@@ -64,12 +65,21 @@ def _run_oauth_local_server(flow, *, on_status=None):
                 on_status(auth_url)
 
         local_server.timeout = 600
+        if on_status:
+            on_status(f"waiting for callback on {flow.redirect_uri} (timeout 10m)...")
         local_server.handle_request()
         try:
-            authorization_response = wsgi_app.last_request_uri.replace("http", "https")
+            authorization_response = wsgi_app.last_request_uri
         except AttributeError as exc:
             raise WSGITimeoutError("Timed out waiting for Google OAuth browser callback") from exc
+        if not authorization_response:
+            raise WSGITimeoutError("Timed out waiting for Google OAuth browser callback")
+
+        if on_status:
+            on_status("callback received, fetching tokens...")
         flow.fetch_token(authorization_response=authorization_response)
+        if on_status:
+            on_status("tokens fetched successfully")
     finally:
         local_server.server_close()
     return flow.credentials
