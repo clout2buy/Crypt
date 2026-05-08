@@ -16,7 +16,7 @@ evals, trace redaction, and installable packaging.
 
 - 🧩 **Simple core:** one CLI entrypoint, modular `core/` services, and one tool per file in `tools/`.
 - 🔐 **Safer by default:** read-before-edit, stale-write protection, shell danger checks, secret redaction, and SSRF-safe `web_fetch`.
-- 🤖 **Multi-provider:** Anthropic, OpenAI-compatible endpoints, ChatGPT/Codex OAuth, and Ollama.
+- 🤖 **Multi-provider:** Anthropic, OpenAI-compatible endpoints, ChatGPT/Codex OAuth, Gemini, and Ollama.
 - 🧠 **Subagents:** typed explorer, planner, worker, verifier, UI reviewer, and release reviewer lanes.
 - 📊 **Measurable quality:** benchmark tasks, real-repo target evals, traces, CI, coverage, wheel smoke tests, and dependency audit.
 - 🧰 **Fork friendly:** focused docs, explicit module boundaries, and a release checklist for contributors.

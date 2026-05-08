@@ -17,6 +17,7 @@ class Credential:
     email: str | None = None
     plan: str | None = None
     account_id: str | None = None
+    project_id: str | None = None
 
 
 def _auth_path() -> Path:
@@ -170,9 +171,104 @@ def resolve_openai_codex() -> Credential | None:
     return None
 
 
+def resolve_gemini(*, include_adc: bool = False) -> Credential | None:
+    """Resolve Gemini credentials.
+
+    Interactive Crypt startup intentionally does not use ADC by default. ADC can
+    be scoped for unrelated Google APIs and caused Gemini to skip browser login
+    before failing with ACCESS_TOKEN_SCOPE_INSUFFICIENT. Callers that explicitly
+    want ADC, such as doctor diagnostics, can opt in with include_adc=True.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if api_key:
+        return Credential(kind="api", token=api_key, project_id=os.getenv("GEMINI_PROJECT_ID"))
+
+    stored = load_provider("gemini")
+    if stored and stored.get("type") == "gemini-oauth":
+        cred = _resolve_stored_gemini(stored)
+        if cred:
+            return cred
+
+    if include_adc:
+        return _resolve_adc_gemini()
+    return None
+
+
+def _resolve_stored_gemini(stored: dict) -> Credential | None:
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+
+        from .settings import GEMINI_OAUTH_SCOPES
+
+        info = stored.get("credentials") if isinstance(stored.get("credentials"), dict) else stored
+        required_scopes = set(GEMINI_OAUTH_SCOPES)
+        stored_scopes = _stored_oauth_scopes(info)
+        if stored_scopes and not required_scopes.issubset(stored_scopes):
+            return None
+        creds = Credentials.from_authorized_user_info(info, scopes=list(GEMINI_OAUTH_SCOPES))
+        if not creds.valid:
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                refreshed = json.loads(creds.to_json())
+                refreshed["scopes"] = list(GEMINI_OAUTH_SCOPES)
+                project_id = stored.get("project_id") or os.getenv("GEMINI_PROJECT_ID")
+                if project_id:
+                    refreshed["project_id"] = project_id
+                save_provider("gemini", {
+                    "type": "gemini-oauth",
+                    "credentials": refreshed,
+                    "project_id": project_id,
+                    "email": stored.get("email"),
+                })
+            else:
+                return None
+        if creds.token:
+            return Credential(
+                kind="oauth",
+                token=creds.token,
+                email=stored.get("email"),
+                project_id=stored.get("project_id") or os.getenv("GEMINI_PROJECT_ID"),
+            )
+    except Exception:
+        return None
+    return None
+
+
+def _stored_oauth_scopes(info: dict) -> set[str]:
+    raw = info.get("scopes") or info.get("scope")
+    if isinstance(raw, str):
+        return set(raw.split())
+    if isinstance(raw, list):
+        return {str(scope) for scope in raw}
+    return set()
+
+
+def _resolve_adc_gemini() -> Credential | None:
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request
+
+        from .settings import GEMINI_OAUTH_SCOPES
+
+        creds, project_id = google.auth.default(scopes=list(GEMINI_OAUTH_SCOPES))
+        if not creds.valid:
+            creds.refresh(Request())
+        token = getattr(creds, "token", "")
+        if token:
+            return Credential(
+                kind="oauth",
+                token=token,
+                project_id=os.getenv("GEMINI_PROJECT_ID") or project_id,
+            )
+    except Exception:
+        return None
+    return None
+
+
 def _as_provider_records(data: dict) -> dict[str, dict]:
     """Normalize legacy single-provider auth.json into provider records."""
-    if any(k in data for k in ("anthropic", "openai-codex")):
+    if any(k in data for k in ("anthropic", "openai-codex", "gemini")):
         return {
             k: v
             for k, v in data.items()

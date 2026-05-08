@@ -327,6 +327,7 @@ def _check_provider_auth() -> Check:
         PROVIDER_OLLAMA,
         PROVIDER_OPENAI,
         PROVIDER_OPENAI_CODEX,
+        PROVIDER_GEMINI,
         is_local_host,
         is_ollama_cloud_host,
         load_config,
@@ -353,6 +354,18 @@ def _check_provider_auth() -> Check:
             if stored.get("access") and stored.get("account_id"):
                 return Check("provider auth", True, "ChatGPT OAuth credentials available")
             return Check("provider auth", False, "OpenAI Codex selected; run login --provider openai-codex")
+
+        if provider == PROVIDER_GEMINI:
+            if os.getenv("GEMINI_API_KEY"):
+                return Check("provider auth", True, "GEMINI_API_KEY is set")
+            stored_cred = auth.resolve_gemini()
+            if stored_cred and stored_cred.project_id:
+                return Check("provider auth", True, "Gemini Google OAuth credentials available")
+            if stored_cred:
+                return Check("provider auth", False, "Gemini OAuth needs GEMINI_PROJECT_ID for Vertex AI")
+            if auth.resolve_gemini(include_adc=True):
+                return Check("provider auth", True, "Gemini Application Default Credentials available")
+            return Check("provider auth", False, "Gemini selected; set GEMINI_API_KEY or run login --provider gemini")
 
         if provider == PROVIDER_OLLAMA:
             host = ollama_host(saved=saved)
@@ -383,6 +396,7 @@ def _check_known_model() -> Check:
         OLLAMA_MODELS,
         OPENAI_MODELS,
         OPENAI_CODEX_MODELS,
+        GEMINI_MODELS,
         load_config,
         provider_default,
         model_default,
@@ -397,6 +411,8 @@ def _check_known_model() -> Check:
         known = OPENAI_MODELS
     elif provider == "openai-codex":
         known = OPENAI_CODEX_MODELS
+    elif provider == "gemini":
+        known = GEMINI_MODELS
     else:
         known = OLLAMA_MODELS
     if model in known:

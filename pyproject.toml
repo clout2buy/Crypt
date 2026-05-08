@@ -13,6 +13,8 @@ license-files = ["LICENSE"]
 authors = [{ name = "Crypt contributors" }]
 dependencies = [
     "anthropic",
+    "google-auth",
+    "google-auth-oauthlib",
     "pypdf",
     "python-dotenv",
     "rich",

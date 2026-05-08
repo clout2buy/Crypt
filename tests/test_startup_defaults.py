@@ -17,6 +17,12 @@ def _clear_provider_env(monkeypatch) -> None:
         "OPENAI_BASE_URL",
         "OPENAI_CODEX_BASE_URL",
         "OPENAI_CODEX_MODEL",
+        "GEMINI_API_KEY",
+        "GEMINI_BASE_URL",
+        "GEMINI_CLIENT_SECRET_FILE",
+        "GEMINI_LOCATION",
+        "GEMINI_MODEL",
+        "GEMINI_PROJECT_ID",
         "OLLAMA_API_KEY",
         "OLLAMA_HOST",
     ):
@@ -183,6 +189,57 @@ def test_login_if_needed_does_not_prompt_when_non_interactive(monkeypatch):
     monkeypatch.setattr(main.ui, "ask", fail_if_called)
 
     assert main._login_if_needed(settings.PROVIDER_OPENAI_CODEX, None, interactive=False) is None
+
+
+def test_login_if_needed_runs_gemini_login_before_provider(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    calls: list[str] = []
+
+    monkeypatch.setattr(main.ui, "ask", lambda prompt: "Gemini" in prompt)
+    monkeypatch.setattr(main, "_do_login", lambda provider: calls.append(provider) or 0)
+    monkeypatch.setattr(
+        main,
+        "_credential",
+        lambda provider: main.auth.Credential(kind="oauth", token="token", project_id="project-123"),
+    )
+
+    cred = main._login_if_needed(settings.PROVIDER_GEMINI, None)
+
+    assert calls == [settings.PROVIDER_GEMINI]
+    assert cred is not None
+    assert cred.project_id == "project-123"
+
+
+def test_gemini_provider_uses_api_key_from_env(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+
+    provider = main._provider(_args(), {}, settings.PROVIDER_GEMINI)
+
+    assert provider.is_oauth is False
+    assert provider._api_key == "gemini-key"
+    assert provider._stream_url() == (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        "models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+    )
+
+
+def test_gemini_provider_uses_vertex_url_for_oauth(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    cred = main.auth.Credential(kind="oauth", token="token", project_id="project-123")
+
+    provider = main._provider(
+        _args(model="models/gemini-2.5-pro"),
+        {"gemini_location": "us-central1"},
+        settings.PROVIDER_GEMINI,
+        cred,
+    )
+
+    assert provider.is_oauth is True
+    assert provider._stream_url() == (
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/project-123/locations/us-central1/"
+        "publishers/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    )
 
 
 def test_ollama_auth_label_uses_runtime_local_transport_for_cloud_model(monkeypatch):

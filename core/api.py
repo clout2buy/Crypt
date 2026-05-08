@@ -28,6 +28,10 @@ from .settings import (
     ANTHROPIC_OAUTH_USER_AGENT,
     ANTHROPIC_OAUTH_X_APP,
     ANTHROPIC_THINKING_BUDGET,
+    GEMINI_BASE_URL,
+    GEMINI_MAX_TOKENS,
+    GEMINI_MODEL,
+    GEMINI_VERTEX_LOCATION,
     OLLAMA_MODEL,
     OPENAI_BASE_URL,
     OPENAI_CODEX_BASE_URL,
@@ -841,6 +845,154 @@ class OpenAICodexProvider:
         return body
 
 
+class GeminiProvider:
+    """Gemini API adapter over REST/SSE.
+
+    API keys use the Gemini Developer API. OAuth tokens use Vertex AI, which
+    requires a Google Cloud project and location.
+    """
+
+    name = "gemini"
+    context_window = 1_048_576
+
+    def __init__(
+        self,
+        model: str = GEMINI_MODEL,
+        max_tokens: int = GEMINI_MAX_TOKENS,
+        api_key: str | None = None,
+        auth_token: str | None = None,
+        project_id: str | None = None,
+        location: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        key = api_key or os.getenv("GEMINI_API_KEY")
+        if not auth_token and not key:
+            raise RuntimeError(
+                "GeminiProvider needs either GEMINI_API_KEY or Google OAuth credentials "
+                "(`python -m crypt login --provider gemini`)."
+            )
+        self.model = model.removeprefix("models/")
+        self._api_key = key
+        self._auth_token = auth_token
+        self._project_id = project_id or os.getenv("GEMINI_PROJECT_ID") or ""
+        self._location = location or os.getenv("GEMINI_LOCATION") or GEMINI_VERTEX_LOCATION
+        self._max_tokens = max_tokens
+        self._base_url = (base_url or os.getenv("GEMINI_BASE_URL") or GEMINI_BASE_URL).rstrip("/")
+        self._http = httpx.Client(timeout=httpx.Timeout(10.0, read=240.0))
+        atexit.register(self.close)
+
+    @property
+    def is_oauth(self) -> bool:
+        return bool(self._auth_token)
+
+    def close(self) -> None:
+        try:
+            self._http.close()
+        except Exception:
+            pass
+
+    def stream_turn(self, messages, tools, system):
+        body = self._build_body(messages, tools, system)
+        url = self._stream_url()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        if self._auth_token:
+            headers["Authorization"] = f"Bearer {self._auth_token}"
+            if self._project_id:
+                headers["x-goog-user-project"] = self._project_id
+        elif self._api_key:
+            headers["x-goog-api-key"] = self._api_key
+
+        text_buf: list[str] = []
+        tool_calls: list[dict] = []
+        usage: dict | None = None
+        stop = "end_turn"
+
+        with self._http.stream("POST", url, json=body, headers=headers) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                raise RuntimeError(_gemini_http_error(resp, oauth=bool(self._auth_token)))
+            buf = ""
+            for chunk in resp.iter_text():
+                buf += chunk
+                while "\n\n" in buf:
+                    block, buf = buf.split("\n\n", 1)
+                    data = _parse_data_sse(block)
+                    if data is None:
+                        continue
+                    for ev in _process_gemini_response(data, text_buf, tool_calls):
+                        yield ev
+                    usage_meta = data.get("usageMetadata")
+                    if isinstance(usage_meta, dict):
+                        usage = {
+                            "input_tokens": usage_meta.get("promptTokenCount", 0),
+                            "output_tokens": usage_meta.get("candidatesTokenCount", 0),
+                            "total_tokens": usage_meta.get("totalTokenCount", 0),
+                        }
+                    reason = _gemini_finish_reason(data)
+                    if reason == "MAX_TOKENS":
+                        stop = "max_tokens"
+
+        content: list[dict] = []
+        if text_buf:
+            content.append({"type": "text", "text": "".join(text_buf)})
+        for idx, call in enumerate(tool_calls):
+            name = str(call.get("name") or "")
+            if not name:
+                continue
+            args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            content.append({
+                "type": "tool_use",
+                "id": f"gemini_call_{idx}",
+                "name": name,
+                "input": args,
+            })
+        if any(block.get("type") == "tool_use" for block in content):
+            stop = "tool_use"
+
+        yield TurnEnd(
+            stop_reason=stop,
+            message={"role": "assistant", "content": content},
+            usage=usage,
+        )
+
+    def _build_body(self, messages, tools, system):
+        body: dict = {
+            "contents": _to_gemini_contents(messages),
+            "generationConfig": {
+                "maxOutputTokens": self._max_tokens,
+            },
+        }
+        if system:
+            body["systemInstruction"] = {"parts": [{"text": system}]}
+        if tools:
+            declarations = [_to_gemini_function(tool) for tool in tools]
+            body["tools"] = [{"functionDeclarations": declarations}]
+            body["toolConfig"] = {
+                "functionCallingConfig": {"mode": "AUTO"},
+            }
+        return body
+
+    def _stream_url(self) -> str:
+        model = self.model.removeprefix("publishers/google/models/").removeprefix("models/")
+        if self._auth_token:
+            if not self._project_id:
+                raise RuntimeError(
+                    "Gemini OAuth requires GEMINI_PROJECT_ID so Crypt can call Vertex AI. "
+                    "Set GEMINI_PROJECT_ID to a Google Cloud project with Vertex AI enabled."
+                )
+            location = self._location or GEMINI_VERTEX_LOCATION
+            host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
+            return (
+                f"https://{host}/v1/projects/{self._project_id}/locations/{location}"
+                f"/publishers/google/models/{model}:streamGenerateContent?alt=sse"
+            )
+        api_model = self.model if self.model.startswith("models/") else f"models/{self.model}"
+        return f"{self._base_url}/{api_model}:streamGenerateContent?alt=sse"
+
+
 def _codex_responses_url(base_url: str) -> str:
     normalized = base_url.rstrip("/")
     if normalized.endswith("/codex/responses"):
@@ -1033,6 +1185,175 @@ def _to_openai_messages(messages: list[dict]) -> list[dict]:
             out.extend(deferred_results)
 
     return out
+
+
+def _parse_data_sse(block: str) -> dict | None:
+    data_parts: list[str] = []
+    for line in block.splitlines():
+        if line.startswith("data:"):
+            data_parts.append(line[5:].lstrip())
+    if not data_parts:
+        return None
+    payload = "\n".join(data_parts).strip()
+    if not payload or payload == "[DONE]":
+        return None
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _process_gemini_response(data: dict, text_buf: list[str], tool_calls: list[dict]):
+    candidates = data.get("candidates") or []
+    for candidate in candidates:
+        content = candidate.get("content") if isinstance(candidate, dict) else None
+        parts = (content or {}).get("parts") if isinstance(content, dict) else None
+        if not isinstance(parts, list):
+            continue
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if text:
+                text = str(text)
+                text_buf.append(text)
+                yield TextDelta(text)
+            call = part.get("functionCall") or part.get("function_call")
+            if isinstance(call, dict):
+                tool_calls.append(call)
+                yield ToolUseProgress(
+                    name=str(call.get("name") or ""),
+                    call_id=f"gemini_call_{len(tool_calls) - 1}",
+                    argument_chars=len(json.dumps(call.get("args") or {})),
+                    partial_json=json.dumps(call.get("args") or {}),
+                )
+
+
+def _gemini_finish_reason(data: dict) -> str:
+    candidates = data.get("candidates") or []
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get("finishReason"):
+            return str(candidate.get("finishReason") or "")
+    return ""
+
+
+def _gemini_http_error(resp: httpx.Response, *, oauth: bool) -> str:
+    text = resp.text or ""
+    message = text
+    reason = ""
+    try:
+        data = resp.json()
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            message = str(err.get("message") or message)
+            details = err.get("details")
+            if isinstance(details, list):
+                for detail in details:
+                    if isinstance(detail, dict) and detail.get("reason"):
+                        reason = str(detail["reason"])
+                        break
+
+    if oauth and (
+        resp.status_code in {401, 403}
+        or reason == "ACCESS_TOKEN_SCOPE_INSUFFICIENT"
+        or "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in text
+    ):
+        return (
+            f"gemini OAuth HTTP {resp.status_code}: {message}. "
+            "Gemini OAuth is routed through Vertex AI, so refresh the browser token with "
+            "`python -m crypt login --provider gemini`, set GEMINI_PROJECT_ID to a Google Cloud "
+            "project with Vertex AI enabled, and set GEMINI_LOCATION if the model is not in "
+            f"{GEMINI_VERTEX_LOCATION}. For the Gemini Developer API path, use GEMINI_API_KEY."
+        )
+
+    body = text[:1000] if text else message
+    return f"gemini HTTP {resp.status_code}: {body}"
+
+
+def _to_gemini_contents(messages: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    tool_names: dict[str, str] = {}
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if isinstance(content, str):
+            out.append({"role": "model" if role == "assistant" else "user", "parts": [{"text": content}]})
+            continue
+        if not isinstance(content, list):
+            continue
+        parts: list[dict] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                parts.append({"text": str(block.get("text", ""))})
+            elif btype == "tool_use":
+                call_id = str(block.get("id") or "")
+                name = str(block.get("name") or "")
+                if call_id:
+                    tool_names[call_id] = name
+                parts.append({
+                    "functionCall": {
+                        "name": name,
+                        "args": block.get("input") if isinstance(block.get("input"), dict) else {},
+                    },
+                })
+            elif btype == "tool_result":
+                inner = block.get("content")
+                if isinstance(inner, list):
+                    inner = "".join(
+                        b.get("text", "") if isinstance(b, dict) else str(b)
+                        for b in inner
+                    )
+                tool_id = str(block.get("tool_use_id") or "")
+                name = tool_names.get(tool_id) or str(block.get("name") or "tool_result")
+                parts.append({
+                    "functionResponse": {
+                        "name": name,
+                        "response": {"result": str(inner) if inner is not None else ""},
+                    },
+                })
+            elif btype == "thinking":
+                continue
+        if parts:
+            out.append({"role": "model" if role == "assistant" else "user", "parts": parts})
+    return out or [{"role": "user", "parts": [{"text": ""}]}]
+
+
+def _to_gemini_function(tool: dict) -> dict:
+    return {
+        "name": str(tool.get("name", "")),
+        "description": str(tool.get("description", "")),
+        "parameters": _to_gemini_schema(tool.get("input_schema") or tool.get("schema") or {}),
+    }
+
+
+def _to_gemini_schema(schema: dict) -> dict:
+    if not isinstance(schema, dict):
+        return {"type": "OBJECT"}
+    out: dict = {}
+    for key, value in schema.items():
+        if key in {"additionalProperties", "$schema"}:
+            continue
+        if key == "type" and isinstance(value, str):
+            out[key] = value.upper()
+        elif key == "properties" and isinstance(value, dict):
+            out[key] = {
+                str(name): _to_gemini_schema(sub if isinstance(sub, dict) else {})
+                for name, sub in value.items()
+            }
+        elif key == "items" and isinstance(value, dict):
+            out[key] = _to_gemini_schema(value)
+        elif key in {"required", "enum", "description", "format", "nullable"}:
+            out[key] = value
+        elif isinstance(value, dict):
+            out[key] = _to_gemini_schema(value)
+    return out or {"type": "OBJECT"}
 
 
 class OllamaProvider:

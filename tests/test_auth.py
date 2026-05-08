@@ -104,6 +104,37 @@ def test_expired_openai_codex_oauth_refreshes_claims(monkeypatch, tmp_path):
     assert saved["refresh"] == "refresh-token-new"
 
 
+def test_gemini_resolver_uses_api_key_before_oauth(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "AUTH_PATH", tmp_path / "auth.json")
+    monkeypatch.setattr(auth, "AUTH_PATH", tmp_path / "auth.json")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("GEMINI_PROJECT_ID", "project-123")
+
+    cred = auth.resolve_gemini()
+
+    assert cred is not None
+    assert cred.kind == "api"
+    assert cred.token == "gemini-key"
+    assert cred.project_id == "project-123"
+
+
+def test_gemini_resolver_does_not_use_adc_unless_requested(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "AUTH_PATH", tmp_path / "auth.json")
+    monkeypatch.setattr(auth, "AUTH_PATH", tmp_path / "auth.json")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    adc = auth.Credential(kind="oauth", token="adc-token", project_id="adc-project")
+
+    monkeypatch.setattr(auth, "_resolve_adc_gemini", lambda: adc)
+
+    assert auth.resolve_gemini() is None
+    assert auth.resolve_gemini(include_adc=True) == adc
+
+
+def test_gemini_stored_scope_helper_accepts_string_or_list():
+    assert auth._stored_oauth_scopes({"scope": "a b"}) == {"a", "b"}
+    assert auth._stored_oauth_scopes({"scopes": ["a", "b"]}) == {"a", "b"}
+
+
 def test_corrupt_auth_file_is_ignored(monkeypatch, tmp_path):
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not-json", encoding="utf-8")

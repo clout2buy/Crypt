@@ -17,7 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from core import auth, runtime, session as sessions, settings, ui
-from core.api import AnthropicProvider, OllamaProvider, OpenAICodexProvider, OpenAIProvider
+from core.api import AnthropicProvider, GeminiProvider, OllamaProvider, OpenAICodexProvider, OpenAIProvider
 from core.loop import run
 
 
@@ -30,7 +30,7 @@ def main() -> int:
     p.add_argument(
         "--provider",
         choices=settings.PROVIDERS,
-        help="anthropic oauth, openai-compatible, openai-codex oauth, or ollama",
+        help="anthropic oauth, openai-compatible, openai-codex oauth, gemini, or ollama",
     )
     p.add_argument("--model", help="model id; overrides saved/default model")
     p.add_argument("--cwd", help="workspace root for tools")
@@ -116,6 +116,7 @@ def main() -> int:
                     (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
                     (settings.PROVIDER_OPENAI, "OpenAI (or compatible)"),
                     (settings.PROVIDER_OPENAI_CODEX, "ChatGPT OAuth (Codex)"),
+                    (settings.PROVIDER_GEMINI, "Gemini OAuth/API key"),
                     (settings.PROVIDER_OLLAMA, "Ollama (local/cloud)"),
                 ],
                 getattr(active_provider, "name", provider_name),
@@ -216,6 +217,7 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
             ("anthropic", "Anthropic OAuth"),
             ("openai", "OpenAI (or compatible)"),
             ("openai-codex", "ChatGPT OAuth (Codex)"),
+            ("gemini", "Gemini OAuth/API key"),
             ("ollama", "Ollama (local/cloud)"),
         ],
         settings.provider_default(saved),
@@ -244,6 +246,15 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
             "provider": provider,
             "openai_codex_model": model,
         }
+    elif provider == settings.PROVIDER_GEMINI:
+        model = args.model or _pick_model(provider, saved)
+        values = {
+            "workspace": str(workspace),
+            "provider": provider,
+            "gemini_model": model,
+        }
+        if not os.getenv("GEMINI_API_KEY") and not auth.resolve_gemini():
+            ui.info("Gemini needs GEMINI_API_KEY or Google OAuth (`python -m crypt login --provider gemini`)")
     else:
         host = settings.ollama_host(args.ollama_host, saved)
         model = args.model or _pick_model(provider, saved, host=host)
@@ -269,6 +280,12 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
         and ui.ask("log in to ChatGPT now?")
     ):
         _do_login(provider)
+    if (
+        provider == settings.PROVIDER_GEMINI
+        and not auth.resolve_gemini()
+        and ui.ask("log in to Gemini with Google OAuth now?")
+    ):
+        _do_login(provider)
     return new_saved
 
 
@@ -286,6 +303,7 @@ def _startup_choice(saved: dict, args: argparse.Namespace, skip: bool = False) -
             (settings.PROVIDER_ANTHROPIC, "Anthropic OAuth"),
             (settings.PROVIDER_OPENAI, "OpenAI (or compatible)"),
             (settings.PROVIDER_OPENAI_CODEX, "ChatGPT OAuth (Codex)"),
+            (settings.PROVIDER_GEMINI, "Gemini OAuth/API key"),
             (settings.PROVIDER_OLLAMA, "Ollama (local/cloud)"),
         ],
         provider_name,
@@ -330,6 +348,8 @@ def _pick_model(provider: str, saved: dict, *, host: str | None = None) -> str:
         models = settings.OPENAI_MODELS
     elif provider == settings.PROVIDER_OPENAI_CODEX:
         models = settings.OPENAI_CODEX_MODELS
+    elif provider == settings.PROVIDER_GEMINI:
+        models = settings.GEMINI_MODELS
     else:
         models = settings.OLLAMA_MODELS
     default = settings.model_default(provider, saved)
@@ -355,6 +375,8 @@ def _credential(provider_name: str) -> auth.Credential | None:
         return auth.resolve_anthropic()
     if provider_name == settings.PROVIDER_OPENAI_CODEX:
         return auth.resolve_openai_codex()
+    if provider_name == settings.PROVIDER_GEMINI:
+        return auth.resolve_gemini()
     return None
 
 
@@ -363,6 +385,10 @@ def _credential_is_usable(provider_name: str, cred: auth.Credential | None) -> b
         return cred is not None
     if provider_name == settings.PROVIDER_OPENAI_CODEX:
         return bool(cred and cred.token and cred.account_id)
+    if provider_name == settings.PROVIDER_GEMINI:
+        if os.getenv("GEMINI_API_KEY"):
+            return True
+        return bool(cred and cred.token and cred.project_id)
     return True
 
 
@@ -371,6 +397,11 @@ def _provider_missing_auth_message(provider_name: str) -> str:
         return "Anthropic auth is missing; run `python main.py login --provider anthropic`."
     if provider_name == settings.PROVIDER_OPENAI_CODEX:
         return "ChatGPT OAuth is missing or incomplete; run `python main.py login --provider openai-codex`."
+    if provider_name == settings.PROVIDER_GEMINI:
+        return (
+            "Gemini auth is missing; set GEMINI_API_KEY or run "
+            "`python main.py login --provider gemini` with GEMINI_PROJECT_ID available."
+        )
     return "provider auth is missing"
 
 
@@ -381,6 +412,10 @@ def _login_prompt(provider_name: str, cred: auth.Credential | None) -> str | Non
         if cred:
             return "ChatGPT OAuth account id is missing; log in to ChatGPT again?"
         return "log in to ChatGPT now?"
+    if provider_name == settings.PROVIDER_GEMINI:
+        if cred and not cred.project_id:
+            return "Gemini OAuth project id is missing; set GEMINI_PROJECT_ID and log in again?"
+        return "log in to Gemini with Google OAuth now?"
     return None
 
 
@@ -425,6 +460,14 @@ def _provider_auth_label(
             suffix = f" ({cred.email})" if cred.email else ""
             return f"ChatGPT OAuth{suffix}"
         return "missing ChatGPT OAuth"
+    if provider_name == settings.PROVIDER_GEMINI:
+        if os.getenv("GEMINI_API_KEY"):
+            return "GEMINI_API_KEY"
+        if cred:
+            suffix = f" ({cred.email})" if cred.email else ""
+            project = f" project={cred.project_id}" if cred.project_id else ""
+            return f"Google OAuth{suffix}{project}"
+        return "missing Gemini auth"
 
     host = getattr(provider, "_base_url", "") or settings.ollama_host(getattr(args, "ollama_host", None), saved or {})
     if settings.is_ollama_cloud_host(host):
@@ -473,6 +516,18 @@ def _provider(
                 settings.OPENAI_CODEX_MAX_TOKENS,
             ),
             base_url=settings.openai_codex_base_url(saved),
+        )
+
+    if provider_name == settings.PROVIDER_GEMINI:
+        if not _credential_is_usable(provider_name, cred):
+            raise RuntimeError(_provider_missing_auth_message(provider_name))
+        return GeminiProvider(
+            model=model_override or args.model or settings.model_default(provider_name, saved),
+            auth_token=cred.token if cred and cred.kind == "oauth" else None,
+            project_id=(cred.project_id if cred else None) or settings.gemini_project_id(saved),
+            location=settings.gemini_vertex_location(saved),
+            max_tokens=args.max_tokens or settings.env_int("GEMINI_MAX_TOKENS", settings.GEMINI_MAX_TOKENS),
+            base_url=settings.gemini_base_url(saved),
         )
 
     host = settings.ollama_host(args.ollama_host, saved)
@@ -553,6 +608,14 @@ def _save_runtime_choice(
         values["openai_model"] = model
     elif provider_name == settings.PROVIDER_OPENAI_CODEX:
         values["openai_codex_model"] = model
+    elif provider_name == settings.PROVIDER_GEMINI:
+        values["gemini_model"] = model
+        project_id = settings.gemini_project_id(saved)
+        if project_id:
+            values["gemini_project_id"] = project_id
+        location = settings.gemini_vertex_location(saved)
+        if location:
+            values["gemini_location"] = location
     else:
         values["ollama_model"] = model
         host = settings.ollama_host(args.ollama_host, saved)
@@ -572,7 +635,7 @@ def _welcome(
         provider=provider.name,
         model=provider.model,
         auth_kind=_provider_auth_label(provider_name, args, saved, cred, provider=provider),
-        auth_email=cred.email if provider_name in {settings.PROVIDER_ANTHROPIC, settings.PROVIDER_OPENAI_CODEX} and cred else None,
+        auth_email=cred.email if provider_name in {settings.PROVIDER_ANTHROPIC, settings.PROVIDER_OPENAI_CODEX, settings.PROVIDER_GEMINI} and cred else None,
         auth_plan=cred.plan if provider_name in {settings.PROVIDER_ANTHROPIC, settings.PROVIDER_OPENAI_CODEX} and cred else None,
         cwd=cwd,
     )
@@ -597,6 +660,16 @@ def _do_login(provider_name: str = settings.PROVIDER_ANTHROPIC) -> int:
                 "plan": tokens.get("plan"),
             })
             ui.info("logged in to ChatGPT")
+        elif provider_name == settings.PROVIDER_GEMINI:
+            from core.gemini_oauth import login
+
+            tokens = login(on_status=lambda m: ui.info(m))
+            auth.save_provider("gemini", {
+                "type": "gemini-oauth",
+                "credentials": tokens["credentials"],
+                "project_id": tokens.get("project_id") or os.getenv("GEMINI_PROJECT_ID"),
+            })
+            ui.info("logged in to Gemini")
         else:
             from core.oauth import login
 

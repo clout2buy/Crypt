@@ -11,6 +11,7 @@ needed to run, fork, and debug Crypt.
 | Anthropic | `python -m crypt login` or `ANTHROPIC_API_KEY` | OAuth tokens live in `~/.crypt/auth.json`. |
 | OpenAI-compatible | `OPENAI_API_KEY=...` | Supports OpenAI Chat Completions-compatible servers. |
 | ChatGPT/Codex OAuth | `python -m crypt login --provider openai-codex` | Uses ChatGPT/Codex OAuth, separate from Platform API keys. |
+| Gemini | `GEMINI_API_KEY=...` or `python -m crypt login --provider gemini` | API keys use Gemini Developer API. OAuth uses Vertex AI and needs `GEMINI_PROJECT_ID`. |
 
 ## Approval Modes
 
@@ -55,7 +56,7 @@ Dangerous commands such as `rm -rf`, `git reset --hard`, `git clean`, and
 | Variable | Default | Purpose |
 |---|---|---|
 | `CRYPT_ROOT` | saved setup or cwd | Workspace root |
-| `CRYPT_PROVIDER` | saved setup or `ollama` | `anthropic`, `openai`, `openai-codex`, or `ollama` |
+| `CRYPT_PROVIDER` | saved setup or `ollama` | `anthropic`, `openai`, `openai-codex`, `gemini`, or `ollama` |
 | `CRYPT_APPROVAL` | `edits` | `normal`, `edits`, or `all` |
 | `CRYPT_REASONING_STALL_SECONDS` | `45` | Abort hidden reasoning-only stalls; `0` disables |
 | `CRYPT_NO_ANIMATION` | unset | Disable startup animation |
@@ -71,6 +72,11 @@ Dangerous commands such as `rm -rf`, `git reset --hard`, `git clean`, and
 | `OPENAI_CODEX_MODEL` | `gpt-5-codex` | ChatGPT/Codex OAuth model |
 | `OPENAI_CODEX_BASE_URL` | ChatGPT backend | Codex backend base URL |
 | `OPENAI_CODEX_MAX_TOKENS` | `32000` | Codex output cap |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Default Gemini model |
+| `GEMINI_API_KEY` | unset | Gemini Developer API key auth |
+| `GEMINI_PROJECT_ID` | unset | Google Cloud project for Gemini OAuth through Vertex AI |
+| `GEMINI_LOCATION` | `us-central1` | Vertex AI location for Gemini OAuth |
+| `GEMINI_CLIENT_SECRET_FILE` | `~/.crypt/gemini_client_secret.json` | Desktop OAuth client JSON for browser login |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `OLLAMA_MODEL` | local default | Ollama model |
 | `OLLAMA_API_KEY` | `ollama` | Only needed for cloud/custom auth |

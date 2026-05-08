@@ -22,7 +22,14 @@ PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_OLLAMA = "ollama"
 PROVIDER_OPENAI = "openai"
 PROVIDER_OPENAI_CODEX = "openai-codex"
-PROVIDERS = (PROVIDER_ANTHROPIC, PROVIDER_OPENAI, PROVIDER_OPENAI_CODEX, PROVIDER_OLLAMA)
+PROVIDER_GEMINI = "gemini"
+PROVIDERS = (
+    PROVIDER_ANTHROPIC,
+    PROVIDER_OPENAI,
+    PROVIDER_OPENAI_CODEX,
+    PROVIDER_GEMINI,
+    PROVIDER_OLLAMA,
+)
 
 ANTHROPIC_MODEL = "claude-opus-4-7"
 # Anthropic counts the full requested max_tokens against per-minute rate
@@ -69,6 +76,18 @@ OPENAI_CODEX_MODELS = (
     "gpt-5.2",
     "codex-mini-latest",
 )
+
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_VERTEX_LOCATION = "us-central1"
+GEMINI_MAX_TOKENS = 16_384
+GEMINI_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview",
+)
+GEMINI_OAUTH_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 
 OLLAMA_MODEL = "gpt-oss:20b"
 OLLAMA_HOST = "http://localhost:11434"
@@ -199,6 +218,8 @@ def provider_default(saved: dict | None = None) -> str:
         return PROVIDER_OLLAMA
     if os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL"):
         return PROVIDER_OPENAI
+    if os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_PROJECT_ID"):
+        return PROVIDER_GEMINI
     if os.getenv("ANTHROPIC_API_KEY"):
         return PROVIDER_ANTHROPIC
     return PROVIDER_OLLAMA
@@ -212,6 +233,8 @@ def model_default(provider: str, saved: dict | None = None) -> str:
         return os.getenv("OPENAI_MODEL") or saved.get("openai_model") or OPENAI_MODEL
     if provider == PROVIDER_OPENAI_CODEX:
         return os.getenv("OPENAI_CODEX_MODEL") or saved.get("openai_codex_model") or OPENAI_CODEX_MODEL
+    if provider == PROVIDER_GEMINI:
+        return os.getenv("GEMINI_MODEL") or saved.get("gemini_model") or GEMINI_MODEL
     explicit = os.getenv("OLLAMA_MODEL")
     if explicit:
         return explicit
@@ -235,6 +258,24 @@ def openai_codex_base_url(saved: dict | None = None) -> str:
         or saved.get("openai_codex_base_url")
         or OPENAI_CODEX_BASE_URL
     )
+
+
+def gemini_base_url(saved: dict | None = None) -> str:
+    """Returns the Gemini API base URL (env > saved > default)."""
+    saved = load_config() if saved is None else saved
+    return os.getenv("GEMINI_BASE_URL") or saved.get("gemini_base_url") or GEMINI_BASE_URL
+
+
+def gemini_project_id(saved: dict | None = None) -> str:
+    """Returns the Google Cloud project used for OAuth quota routing."""
+    saved = load_config() if saved is None else saved
+    return os.getenv("GEMINI_PROJECT_ID") or saved.get("gemini_project_id") or ""
+
+
+def gemini_vertex_location(saved: dict | None = None) -> str:
+    """Returns the Vertex AI location for Gemini OAuth requests."""
+    saved = load_config() if saved is None else saved
+    return os.getenv("GEMINI_LOCATION") or saved.get("gemini_location") or GEMINI_VERTEX_LOCATION
 
 
 def ollama_host(cli_host: str | None = None, saved: dict | None = None) -> str:
