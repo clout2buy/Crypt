@@ -1,6 +1,7 @@
 """Registry dispatch — permission integration, classify hooks, missing args."""
 from __future__ import annotations
 
+from core import runtime
 from tools import registry
 from tools.types import Tool
 
@@ -108,12 +109,48 @@ def test_semantic_validation_runs_before_approval(monkeypatch):
     assert "x cannot be bad" in msg
 
 
+def test_empty_edit_validation_gives_recovery_hint(monkeypatch):
+    tool = Tool(
+        name="edit_file",
+        description="edit",
+        schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "edits": {"type": "array"},
+            },
+            "required": ["path"],
+        },
+        permission="ask",
+        run=lambda args: "ran",
+        validate=lambda args: ["edits: expected a non-empty array of {old, new} objects"],
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    ok, msg = registry.dispatch(tool.name, {"path": "x.py", "edits": []}, render=False)
+
+    assert ok is False
+    assert "Empty edits are never valid" in msg
+    assert "read_file" in msg
+
+
 def test_auto_tool_runs_without_prompt(monkeypatch):
     tool = _stub_tool(permission="auto")
     monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
     ok, output = registry.dispatch(tool.name, {"x": "hi"}, render=False)
     assert ok is True
     assert "ran" in output
+
+
+def test_subagent_allowlist_is_enforced_at_dispatch(monkeypatch):
+    tool = _stub_tool(permission="auto")
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    with runtime.subagent_context(agent_type="explorer", allowed_tools={"read_file"}, task_id="agent_1"):
+        ok, output = registry.dispatch(tool.name, {"x": "hi"}, render=False)
+
+    assert ok is False
+    assert "not allowed for this subagent" in output
 
 
 def test_ask_tool_blocked_in_subagent(monkeypatch):
@@ -166,6 +203,28 @@ def test_run_exception_surfaces_as_failure(monkeypatch):
     assert ok is False
     assert "RuntimeError" in msg
     assert "boom" in msg
+
+
+def test_edit_failure_includes_specific_recovery_hint(monkeypatch):
+    def bad_run(args):
+        raise ValueError("edit 1: no match for 'old text'")
+
+    tool = Tool(
+        name="edit_file",
+        description="edit",
+        schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        permission="auto",
+        run=bad_run,
+        summary=lambda args: str(args.get("path", "")),
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+    ok, msg = registry.dispatch(tool.name, {"path": "app.py"}, render=False)
+
+    assert ok is False
+    assert "Recovery:" in msg
+    assert "read_file" in msg
+    assert "exact current source" in msg
 
 
 # ─── lifecycle UI integration ───────────────────────────────────────────

@@ -4,7 +4,7 @@ import base64
 import mimetypes
 import os
 
-from .fs import clip, rel, resolve_read
+from .fs import clip, rel, resolve_read, within_root
 from .types import Tool
 
 
@@ -95,6 +95,13 @@ def summary(args: dict) -> str:
     return str(args.get("path", ""))
 
 
+def classify(args: dict) -> str | None:
+    path = str(args.get("path", ""))
+    if not path:
+        return None
+    return "safe" if within_root(path) else "ask"
+
+
 TOOL = Tool(
     "read_media",
     (
@@ -113,5 +120,6 @@ TOOL = Tool(
     run,
     priority=25,
     summary=summary,
+    classify=classify,
     parallel_safe=True,
 )

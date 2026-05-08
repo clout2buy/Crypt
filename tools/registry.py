@@ -33,13 +33,20 @@ class Registry:
         out: list[dict] = []
         for tool in self._ordered_tools():
             if for_subagent:
-                if not tool.available_in_subagent:
-                    continue
-                # Subagents are intentionally non-interactive. Give them the
-                # read-only/auto tool surface and keep approval-gated actions in
-                # the main agent where the user can see and approve them.
-                if tool.permission != "auto":
-                    continue
+                from core import runtime
+
+                allowed = runtime.current_subagent_tools()
+                if allowed is not None:
+                    if tool.name not in allowed:
+                        continue
+                else:
+                    if not tool.available_in_subagent:
+                        continue
+                    # Subagents are intentionally non-interactive by default.
+                    # Give them the read-only/auto surface unless a typed agent
+                    # context has explicitly narrowed and expanded its tools.
+                    if tool.permission != "auto":
+                        continue
             out.append({
                 "name": tool.name,
                 "description": tool.description,
@@ -109,11 +116,14 @@ def dispatch(
     ``tool_call`` + ``tool_result`` calls so callers that don't have an ID
     (CLI invocations, ad-hoc test paths) still render correctly.
     """
-    from core import permissions, runtime
+    from core import evidence, permissions, runtime, tool_policy
 
     tool = REGISTRY.get(name)
     if tool is None:
         return False, f"unknown tool: {name}"
+    allowed_tools = runtime.current_subagent_tools()
+    if allowed_tools is not None and name not in allowed_tools:
+        return False, f"tool not allowed for this subagent: {name}"
 
     quiet = tool.quiet
     using_lifecycle = bool(render and tool_use_id)
@@ -173,14 +183,52 @@ def dispatch(
         shown = "; ".join(validation_errors[:4])
         if len(validation_errors) > 4:
             shown += f"; +{len(validation_errors) - 4} more"
-        msg = f"schema validation failed: {shown}. Fix the arguments and retry once; do not repeat the same invalid call."
+        recovery = _validation_recovery_hint(tool.name, args, shown)
+        msg = (
+            f"schema validation failed: {shown}. {recovery} "
+            "Fix the arguments and retry once; do not repeat the same invalid call."
+        )
         _emit_failure(msg)
         return False, msg
 
     preflight_error = _preflight(tool, args)
     if preflight_error:
-        _emit_failure(preflight_error)
-        return False, preflight_error
+        hint = _tool_failure_recovery_hint(tool.name, args, preflight_error)
+        msg = f"{preflight_error}{hint}"
+        _emit_failure(msg)
+        return False, msg
+
+    policy_decision = tool_policy.preflight(tool.name, args)
+    tool_policy.record_decision(tool.name, policy_decision)
+    if policy_decision.action == tool_policy.BLOCK:
+        msg = (
+            f"blocked by runtime policy: {policy_decision.reason}. "
+            f"{policy_decision.required_action}"
+        ).strip()
+        _emit_failure(msg)
+        evidence.record_tool_result(
+            tool.name,
+            args,
+            ok=False,
+            output=msg,
+            task_id=runtime.current_agent_task_id(),
+        )
+        return False, msg
+    if policy_decision.action == tool_policy.WARN:
+        warning = (
+            f"runtime policy warning: {policy_decision.reason}. "
+            f"{policy_decision.required_action}"
+        ).strip()
+        if not render:
+            evidence.record_tool_result(
+                tool.name,
+                args,
+                ok=False,
+                output=warning,
+                task_id=runtime.current_agent_task_id(),
+            )
+            return False, warning
+        ui.info(warning)
 
     # User-defined rules first. Deny always wins; explicit allow trumps the
     # danger prompt because the user opted in by writing the rule.
@@ -216,9 +264,12 @@ def dispatch(
     elif classification == "safe":
         # Read-only / harmless. Skip the prompt regardless of mode.
         pass
-    elif tool.permission == "ask" and not runtime.can_auto_approve(tool.name):
+    elif classification == "ask" and runtime.yolo():
+        pass
+    elif classification == "ask" or (tool.permission == "ask" and not runtime.can_auto_approve(tool.name)):
         if not render:
-            return False, "approval required: interactive tool call unavailable in non-interactive subagent"
+            if not _subagent_can_run_ask_tool(tool.name, classification):
+                return False, "approval required: interactive tool call unavailable in non-interactive subagent"
         if render:
             if using_lifecycle:
                 ui.tool_set_state(tool_use_id, "approval")
@@ -243,10 +294,26 @@ def dispatch(
             out = tool.run(args)
     except Exception as e:
         msg = f"{type(e).__name__}: {e}"
+        msg += _tool_failure_recovery_hint(tool.name, args, msg)
         _emit_failure(msg)
+        evidence.record_tool_result(
+            tool.name,
+            args,
+            ok=False,
+            output=msg,
+            task_id=runtime.current_agent_task_id(),
+        )
         return False, msg
 
     display = redact.text(_display_output(out))
+    evidence.record_tool_result(
+        tool.name,
+        args,
+        ok=True,
+        output=display,
+        task_id=runtime.current_agent_task_id(),
+    )
+    tool_policy.after_tool(tool.name, args, ok=True)
     if render:
         if using_lifecycle and not quiet:
             ui.tool_end(tool_use_id, ok=True, output=display)
@@ -304,6 +371,82 @@ def _render_preview(tool: Tool, args: dict) -> None:
         return
     if text:
         ui.diff_preview(text)
+
+
+def _validation_recovery_hint(tool_name: str, args: dict, shown: str) -> str:
+    if tool_name in {"edit_file", "multi_edit"} and "non-empty" in shown:
+        return (
+            "Empty edits are never valid. Use read_file to recover exact source context, "
+            "then retry with at least one concrete old/new replacement."
+        )
+    if tool_name == "write_file" and "content" in shown:
+        return "write_file needs a complete content string; use a smaller complete file if necessary."
+    return "This is an argument-shape error, not a task blocker."
+
+
+def _tool_failure_recovery_hint(tool_name: str, args: dict, message: str) -> str:
+    """Attach one concrete next step to common tool failures.
+
+    The model sees tool errors as ordinary text. A precise recovery line keeps
+    it from trying the same bad call repeatedly or giving up with prose.
+    """
+    text = str(message or "")
+    lower = text.lower()
+    hint = ""
+    if tool_name in {"edit_file", "multi_edit"}:
+        if "read-before-edit invariant" in lower or "file has not been read" in lower:
+            path = _path_arg(args)
+            hint = f"Recovery: call read_file on {path or 'the target file'} with no offset/limit, then retry the edit against the exact current text."
+        elif "file changed since crypt read it" in lower:
+            path = _path_arg(args)
+            hint = f"Recovery: call read_file again on {path or 'the target file'} before editing so the replacement uses the newest contents."
+        elif "no match for" in lower:
+            path = _path_arg(args)
+            hint = f"Recovery: call read_file on {path or 'the target file'} around the intended section, copy the exact current source, and retry once with a smaller unique old string."
+        elif "matches for" in lower or "add surrounding lines" in lower:
+            hint = "Recovery: retry with a longer old string that includes surrounding lines so the replacement is unique."
+        elif "no files were modified" in lower:
+            hint = "Recovery: fix the listed failing change first; multi_edit is atomic, so do not repeat unchanged bad edits."
+        elif "refusing to edit binary" in lower:
+            hint = "Recovery: do not use text edit tools on this file; use a domain-specific tool or ask for the intended binary/media operation."
+    elif tool_name == "write_file":
+        if "file exists" in lower:
+            path = _path_arg(args)
+            hint = f"Recovery: use edit_file for {path or 'the existing file'}, or pass overwrite=true only when replacing the entire file is intentional."
+        elif "read-before-edit invariant" in lower or "file changed since crypt read it" in lower:
+            path = _path_arg(args)
+            hint = f"Recovery: read_file {path or 'the existing file'} first, then retry overwrite=true only with the complete desired content."
+    elif tool_name in {"read_file", "read_media", "open_file"}:
+        if "filenotfounderror" in lower:
+            hint = "Recovery: use list_files or glob to find the correct path before retrying."
+        elif "path outside workspace" in lower:
+            hint = "Recovery: use a workspace-relative path, or ask the user to approve/set the workspace before touching outside files."
+        elif "unsupported media type" in lower or "refusing to read binary" in lower:
+            hint = "Recovery: choose read_file for UTF-8 text, read_media for images/PDFs, or explain that this file type is unsupported."
+    elif tool_name in {"bash", "bash_start"}:
+        if "[hint:" in lower:
+            hint = "Recovery: follow the shell hint exactly and retry with the platform-appropriate command."
+        elif "timed out" in lower:
+            hint = "Recovery: use bash_start for long-running commands, then inspect progress with bash_poll."
+        elif "was not found on path" in lower:
+            hint = "Recovery: check the tool name with where/Get-Command, or use the Windows/PowerShell equivalent."
+    elif tool_name in {"grep", "glob", "list_files"}:
+        if "no such file" in lower or "filenotfounderror" in lower:
+            hint = "Recovery: list the parent directory first, then retry with an existing path or broader glob."
+    if not hint:
+        return ""
+    return f"\n{hint}"
+
+
+def _path_arg(args: dict) -> str:
+    if not isinstance(args, dict):
+        return ""
+    if args.get("path"):
+        return str(args.get("path"))
+    changes = args.get("changes")
+    if isinstance(changes, list) and changes and isinstance(changes[0], dict):
+        return str(changes[0].get("path") or "")
+    return ""
 
 
 def _missing_required(tool: Tool, args: dict) -> list[str]:
@@ -426,6 +569,18 @@ def _danger_reason(tool: Tool, args: dict) -> str | None:
         from . import bash_safety
         return bash_safety.is_destructive(str(args.get("command", "")))
     return None
+
+
+def _subagent_can_run_ask_tool(tool_name: str, classification: str | None) -> bool:
+    from core import runtime
+
+    if not runtime.current_subagent_can_use_tool(tool_name):
+        return False
+    if classification == "safe":
+        return True
+    if tool_name in {"write_file", "edit_file", "multi_edit"} and runtime.current_write_scope():
+        return True
+    return False
 
 
 def _preflight(tool: Tool, args: dict) -> str | None:

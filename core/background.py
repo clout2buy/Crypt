@@ -4,12 +4,13 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import runtime, settings
+from . import redact, runtime, settings
 
 
 @dataclass
@@ -37,31 +38,30 @@ def start(command: str, cwd: str | None = None, description: str = "") -> Job:
     job_id = str(uuid.uuid4())[:8]
     out_path = _jobs_dir() / f"{job_id}.log"
     workdir = str(Path(cwd or runtime.cwd()).expanduser().resolve())
-    f = out_path.open("ab")
     header = (
-        f"$ {command}\n"
+        f"$ {redact.text(command)}\n"
         f"[crypt background job {job_id} started {time.strftime('%Y-%m-%d %H:%M:%S')}]\n\n"
     )
-    f.write(header.encode("utf-8", errors="replace"))
-    f.flush()
+    out_path.write_text(header, encoding="utf-8", errors="replace")
     settings.restrict_file_permissions(out_path)
     popen_kwargs = {}
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         popen_kwargs["preexec_fn"] = os.setsid
-    try:
-        proc = subprocess.Popen(
-            command,
-            shell=True,
-            cwd=workdir,
-            stdout=f,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            **popen_kwargs,
-        )
-    finally:
-        f.close()
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=workdir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **popen_kwargs,
+    )
+    threading.Thread(target=_pump_output, args=(proc, out_path), daemon=True).start()
     job = Job(job_id, command, workdir, out_path, time.time(), proc, description)
     _JOBS[job_id] = job
     return job
@@ -73,6 +73,20 @@ def get(job_id: str) -> Job | None:
 
 def forget(job_id: str) -> None:
     _JOBS.pop(job_id, None)
+
+
+def cleanup_finished(max_age_seconds: float = 3600) -> list[str]:
+    """Forget completed background jobs after their log has had time to be read."""
+    removed: list[str] = []
+    cutoff = time.time() - max(0, max_age_seconds)
+    for job_id, job in list(_JOBS.items()):
+        if job.process.poll() is None:
+            continue
+        if job.started_at > cutoff:
+            continue
+        _JOBS.pop(job_id, None)
+        removed.append(job_id)
+    return removed
 
 
 def list_jobs() -> list[Job]:
@@ -130,6 +144,19 @@ def kill(job_id: str) -> str:
             except Exception:
                 job.process.kill()
     return f"job {job.id} killed"
+
+
+def _pump_output(proc: subprocess.Popen, path: Path) -> None:
+    stream = proc.stdout
+    if stream is None:
+        return
+    try:
+        with path.open("a", encoding="utf-8", errors="replace") as f:
+            for line in stream:
+                f.write(redact.text(line))
+            f.flush()
+    except OSError:
+        return
 
 
 def _tail(path: Path, lines: int) -> str:

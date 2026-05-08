@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
+from core import redact
 from core.settings import restrict_file_permissions
 
 from .bash_safety import classify as _classify_command, is_destructive
@@ -241,14 +242,14 @@ def _write_spill(command: str, stdout: str, stderr: str) -> str:
         name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.log"
         path = _SPILL_DIR / name
         with path.open("w", encoding="utf-8", errors="replace") as f:
-            f.write(f"$ {command}\n\n")
+            f.write(f"$ {redact.text(command)}\n\n")
             if stdout:
-                f.write(stdout)
+                f.write(redact.text(stdout))
                 if not stdout.endswith("\n"):
                     f.write("\n")
             if stderr:
                 f.write("\n[stderr]\n")
-                f.write(stderr)
+                f.write(redact.text(stderr))
                 if not stderr.endswith("\n"):
                     f.write("\n")
         restrict_file_permissions(path)
@@ -271,8 +272,11 @@ def summary(args: dict) -> str:
 
 _PROMPT = """
 For shell work. Crypt classifies commands at runtime:
-- read-only commands (`ls`, `pwd`, `git status`, `cat`, `grep`, `rg`, `find`,
-  `git diff/log/show`, `python -V`, etc.) auto-approve in every mode.
+- system-inspection commands (`ls`, `pwd`, `git status`, `git diff/log/show`,
+  `python -V`, etc.) auto-approve in every mode.
+- file-content readers (`cat`, `type`, `Get-Content`, `env`, `printenv`) are
+  approval-gated; prefer `read_file`, `grep`, or `read_media` so workspace and
+  secret boundaries are enforced consistently.
 - destructive commands (`rm -rf`, `git reset --hard`, `git push --force`,
   `git commit --amend`, `git clean`, `dd`, etc.) prompt with a warning even
   in yolo. Don't try to outsmart this — use the dedicated tools when they
@@ -288,8 +292,8 @@ Crypt supports the common single-heredoc stdin pattern (`python - <<'PY'`)
 as a compatibility shim, but prefer short `python -c "..."` commands or
 write a temporary script when quoting gets complex.
 Prefer:
-- `dir` / `type` / `findstr` / `where` (cmd built-ins)
-- `Get-ChildItem` / `Get-Content` / `Select-String` / `Measure-Object`
+- `dir` / `findstr` / `where` (cmd built-ins)
+- `Get-ChildItem` / `Select-String` / `Measure-Object`
   via `powershell -Command "..."`
 - ripgrep (`rg`) when installed — works the same on every platform.
 

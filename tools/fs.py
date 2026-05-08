@@ -53,6 +53,14 @@ MAX_TEXT_BYTES = 5_000_000  # 5MB cap on file reads / scans
 
 
 def root() -> Path:
+    try:
+        from core import runtime
+
+        context_root = runtime.context_cwd()
+        if context_root:
+            return Path(context_root).resolve()
+    except Exception:
+        pass
     return Path(os.getenv("CRYPT_ROOT", ".")).resolve()
 
 
@@ -79,6 +87,17 @@ def resolve_read(path: str) -> Path:
     if p.is_absolute():
         return p.resolve()
     return resolve(path)
+
+
+def within_root(path: str | Path) -> bool:
+    base = root()
+    p = Path(path).expanduser()
+    p = p if p.is_absolute() else base / p
+    try:
+        p.resolve().relative_to(base)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def rel(path: Path) -> str:

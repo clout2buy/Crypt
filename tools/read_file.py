@@ -4,7 +4,7 @@ import os
 
 from core import file_state
 
-from .fs import clip, is_text_file, rel, resolve_read
+from .fs import clip, is_text_file, rel, resolve_read, within_root
 from .types import Tool
 
 
@@ -77,6 +77,13 @@ def summary(args: dict) -> str:
     return path
 
 
+def classify(args: dict) -> str | None:
+    path = str(args.get("path", ""))
+    if not path:
+        return None
+    return "safe" if within_root(path) else "ask"
+
+
 _PROMPT = """
 Each output line is prefixed with `<lineno>→` for reference. The line number
 and arrow are metadata added by the tool, NOT part of the file's contents.
@@ -113,5 +120,6 @@ TOOL = Tool(
     prompt=_PROMPT,
     priority=20,
     summary=summary,
+    classify=classify,
     parallel_safe=True,
 )

@@ -8,6 +8,8 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+import threading
+from contextlib import contextmanager
 from html.parser import HTMLParser
 
 from core.settings import CRYPT_VERSION
@@ -34,6 +36,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
+_DNS_LOCK = threading.RLock()
 
 
 class _HTMLText(HTMLParser):
@@ -89,7 +92,7 @@ def run(args: dict) -> str:
 
     current_url = url
     for redirect_count in range(_MAX_REDIRECTS + 1):
-        _validate_url_policy(current_url)
+        host = _validate_url_policy(current_url)
         req = urllib.request.Request(
             current_url,
             headers={
@@ -98,13 +101,15 @@ def run(args: dict) -> str:
             },
         )
         try:
-            with _open_request(req, timeout=timeout) as resp:
-                status = getattr(resp, "status", 0)
-                ctype = resp.headers.get("content-type", "")
-                final_url = resp.geturl()
-                _validate_url_policy(final_url)
-                data = resp.read(MAX_BYTES + 1)
-                break
+            infos = _resolve_public_infos(host)
+            with _pinned_getaddrinfo(host, infos):
+                with _open_request(req, timeout=timeout) as resp:
+                    status = getattr(resp, "status", 0)
+                    ctype = resp.headers.get("content-type", "")
+                    final_url = resp.geturl()
+                    _validate_url_policy(final_url)
+                    data = resp.read(MAX_BYTES + 1)
+                    break
         except urllib.error.HTTPError as e:
             if e.code in _REDIRECT_STATUSES and e.headers.get("location"):
                 if redirect_count >= _MAX_REDIRECTS:
@@ -184,6 +189,52 @@ def _validate_url_policy(url: str) -> str:
             f"host {host!r} is not in {_ALLOWLIST_ENV}={','.join(allow)}"
         )
     return host
+
+
+def _resolve_public_infos(host: str):
+    try:
+        ipaddress.ip_address(host)
+        return []
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return []
+    if not os.getenv("CRYPT_WEB_ALLOW_PRIVATE"):
+        for info in infos:
+            addr = info[4][0]
+            try:
+                parsed = ipaddress.ip_address(addr)
+            except ValueError:
+                continue
+            tag = _classify_ip(parsed)
+            if tag:
+                raise PermissionError(
+                    f"refusing to fetch a private/loopback host ({addr} ({tag})). "
+                    f"Set CRYPT_WEB_ALLOW_PRIVATE=1 to override."
+                )
+    return infos
+
+
+@contextmanager
+def _pinned_getaddrinfo(host: str, infos):
+    if not infos:
+        yield
+        return
+    original = socket.getaddrinfo
+
+    def pinned(query_host, *args, **kwargs):
+        if str(query_host).lower().rstrip(".") == host.lower().rstrip("."):
+            return infos
+        return original(query_host, *args, **kwargs)
+
+    with _DNS_LOCK:
+        socket.getaddrinfo = pinned
+        try:
+            yield
+        finally:
+            socket.getaddrinfo = original
 
 
 def _charset(content_type: str) -> str | None:

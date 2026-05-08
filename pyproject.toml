@@ -1,3 +1,44 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypt-agent"
+version = "0.3.0"
+description = "Local-first coding agent harness with typed tools and subagents."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Crypt contributors" }]
+dependencies = [
+    "anthropic",
+    "pypdf",
+    "python-dotenv",
+    "rich",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "pip-audit",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+[project.scripts]
+crypt = "main:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["benchmarks*", "core*", "tools*", "crypt*"]
+
+[tool.setuptools.package-data]
+benchmarks = ["*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
@@ -16,3 +57,4 @@ source = ["core", "tools"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 60

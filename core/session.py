@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import settings
+from . import redact, settings
 
 
 SESSION_SCHEMA_VERSION = 1
@@ -142,9 +142,10 @@ class Session:
         settings.restrict_file_permissions(self.path)
 
     def record_message(self, message: dict[str, Any]) -> None:
-        self.append({"type": "message", "message": message})
-        if message.get("role") == "user":
-            text = _message_text(message)
+        safe_message = _redacted_message(message)
+        self.append({"type": "message", "message": safe_message})
+        if safe_message.get("role") == "user":
+            text = _message_text(safe_message)
             if text:
                 self.append({"type": "last_user", "text": text[:5000]})
                 if not self.info().title:
@@ -153,11 +154,15 @@ class Session:
     def record_compaction(self, summary: str, kept_messages: int, messages: list[dict[str, Any]] | None = None) -> None:
         self.append({
             "type": "compact",
-            "summary": summary,
+            "summary": redact.text(summary),
             "kept_messages": kept_messages,
         })
         if messages is not None:
-            self.append({"type": "snapshot", "reason": "compact", "messages": messages})
+            self.append({
+                "type": "snapshot",
+                "reason": "compact",
+                "messages": [_redacted_message(msg) for msg in messages],
+            })
 
     def load_messages(self) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
@@ -182,6 +187,11 @@ def _title_from_text(text: str, limit: int = 64) -> str:
     if not line:
         return "untitled"
     return line if len(line) <= limit else line[: limit - 1].rstrip() + "."
+
+
+def _redacted_message(message: dict[str, Any]) -> dict[str, Any]:
+    safe = redact.content(message)
+    return safe if isinstance(safe, dict) else dict(message)
 
 
 def info_from_path(path: Path) -> SessionInfo:

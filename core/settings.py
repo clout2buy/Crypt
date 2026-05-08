@@ -278,12 +278,20 @@ def ollama_host_for_model(model: str, host: str | None = None) -> str:
 
 def client_host(host: str) -> str:
     host = host.strip()
-    raw = host if "://" in host else f"http://{host}"
+    has_scheme = "://" in host
+    raw = host if has_scheme else f"http://{host}"
     parts = urlsplit(raw)
+    scheme = parts.scheme or "http"
+    hostname = (parts.hostname or "").lower()
+    if not has_scheme and (hostname == "ollama.com" or hostname.endswith(".ollama.com")):
+        scheme = "https"
     if parts.hostname in {"0.0.0.0", "::", "[::]"}:
         port = parts.port or 11434
-        return urlunsplit((parts.scheme or "http", f"127.0.0.1:{port}", "", "", ""))
-    return host
+        return urlunsplit((scheme, f"127.0.0.1:{port}", "", "", ""))
+    if parts.port is None and parts.hostname in {"localhost", "127.0.0.1", "::1"}:
+        netloc = f"{parts.hostname}:11434"
+        return urlunsplit((scheme, netloc, parts.path, parts.query, parts.fragment))
+    return urlunsplit((scheme, parts.netloc, parts.path, parts.query, parts.fragment))
 
 
 def resolve_workspace(cli_root: str | None = None, saved: dict | None = None) -> Path:

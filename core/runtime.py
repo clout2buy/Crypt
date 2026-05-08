@@ -14,11 +14,16 @@ from typing import Callable
 
 _provider = None
 _cwd = "."
-_subagent_runner: Callable[[str], str] | None = None
+_subagent_runner: Callable[..., str] | None = None
 _session = None
 _approval_mode = os.getenv("CRYPT_APPROVAL", "edits").strip().lower()
 _show_thinking = False
 _render_tools = contextvars.ContextVar("crypt_render_tools", default=True)
+_cwd_context = contextvars.ContextVar("crypt_cwd", default=None)
+_subagent_tools = contextvars.ContextVar("crypt_subagent_tools", default=None)
+_write_scope = contextvars.ContextVar("crypt_write_scope", default=None)
+_agent_type = contextvars.ContextVar("crypt_agent_type", default=None)
+_agent_task_id = contextvars.ContextVar("crypt_agent_task_id", default=None)
 _git_snapshot_cache: dict[str, str] = {}
 
 APPROVAL_NORMAL = "normal"
@@ -28,19 +33,16 @@ APPROVAL_MODES = (APPROVAL_NORMAL, APPROVAL_EDITS, APPROVAL_ALL)
 if _approval_mode not in APPROVAL_MODES:
     _approval_mode = APPROVAL_EDITS
 AUTO_EDIT_TOOLS = {
-    "bash",
-    "bash_start",
     "edit_file",
     "multi_edit",
     "write_file",
-    "open_file",
 }
 
 
 def configure(
     provider,
     cwd: str,
-    subagent_runner: Callable[[str], str] | None = None,
+    subagent_runner: Callable[..., str] | None = None,
     session=None,
 ) -> None:
     global _provider, _cwd, _subagent_runner, _session
@@ -69,7 +71,11 @@ def session_id() -> str | None:
 
 
 def cwd() -> str:
-    return _cwd
+    return _cwd_context.get() or _cwd
+
+
+def context_cwd() -> str | None:
+    return _cwd_context.get()
 
 
 def set_cwd(path: str) -> Path:
@@ -167,12 +173,80 @@ def tool_render(enabled: bool):
         _render_tools.reset(token)
 
 
-def run_subagent(prompt: str, context: str | None = None) -> str:
+@contextmanager
+def cwd_context(path: str | Path | None):
+    if path is None:
+        yield
+        return
+    p = str(Path(path).expanduser().resolve())
+    token = _cwd_context.set(p)
+    try:
+        yield
+    finally:
+        _cwd_context.reset(token)
+
+
+def run_subagent(
+    prompt: str,
+    context: str | None = None,
+    *,
+    agent_type: str = "explorer",
+    write_paths: list[str] | None = None,
+    task_id: str | None = None,
+    worktree_path: str | None = None,
+) -> str:
     if _subagent_runner is None:
         return "spawn_agent unavailable: no active subagent runner"
-    if context:
-        return _subagent_runner(prompt, context)
-    return _subagent_runner(prompt)
+    return _subagent_runner(
+        prompt,
+        context,
+        agent_type=agent_type,
+        write_paths=write_paths or [],
+        task_id=task_id,
+        worktree_path=worktree_path,
+    )
+
+
+@contextmanager
+def subagent_context(
+    *,
+    agent_type: str,
+    allowed_tools: set[str] | frozenset[str],
+    write_paths: list[str] | tuple[str, ...] | None = None,
+    task_id: str | None = None,
+):
+    tool_token = _subagent_tools.set(frozenset(allowed_tools))
+    scope_token = _write_scope.set(tuple(write_paths or ()))
+    type_token = _agent_type.set(agent_type)
+    task_token = _agent_task_id.set(task_id)
+    try:
+        yield
+    finally:
+        _agent_task_id.reset(task_token)
+        _agent_type.reset(type_token)
+        _write_scope.reset(scope_token)
+        _subagent_tools.reset(tool_token)
+
+
+def current_subagent_tools() -> frozenset[str] | None:
+    return _subagent_tools.get()
+
+
+def current_write_scope() -> tuple[str, ...] | None:
+    return _write_scope.get()
+
+
+def current_agent_type() -> str | None:
+    return _agent_type.get()
+
+
+def current_agent_task_id() -> str | None:
+    return _agent_task_id.get()
+
+
+def current_subagent_can_use_tool(tool_name: str) -> bool:
+    allowed = current_subagent_tools()
+    return bool(allowed and tool_name in allowed)
 
 
 def background_job_summaries() -> list[str]:
@@ -182,6 +256,19 @@ def background_job_summaries() -> list[str]:
         out: list[str] = []
         for job in background.list_jobs():
             out.append(f"{job.id}: {background.status(job)} - {job.command}")
+        return out
+    except Exception:
+        return []
+
+
+def agent_task_summaries() -> list[str]:
+    try:
+        from .agents import tasks
+
+        out: list[str] = []
+        for task in tasks.list_tasks():
+            if task.status.value in {"queued", "running", "cancel_requested"}:
+                out.append(f"{task.id}: {task.status.value} {task.agent_type} - {task.name}")
         return out
     except Exception:
         return []

@@ -13,6 +13,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import threading
 from dataclasses import dataclass
 from typing import Iterator, Protocol
 
@@ -115,6 +116,7 @@ class AnthropicProvider:
         self._auth_token = auth_token
         self._api_key = api_key
         self._oauth = bool(auth_token)
+        self._lock = threading.RLock()
         self.model = model
         self._max_tokens = max_tokens
         self._max_tokens_override = 0
@@ -148,12 +150,14 @@ class AnthropicProvider:
         get one clean retry at a higher budget. The override clears itself
         after the next API call.
         """
-        self._max_tokens_override = max(escalated, self._max_tokens)
-        return self._max_tokens_override
+        with self._lock:
+            self._max_tokens_override = max(escalated, self._max_tokens)
+            return self._max_tokens_override
 
     def _build_request(self, messages, tools, system):
-        max_tokens = self._max_tokens_override or self._max_tokens
-        self._max_tokens_override = 0
+        with self._lock:
+            max_tokens = self._max_tokens_override or self._max_tokens
+            self._max_tokens_override = 0
         if self._thinking_budget and self._thinking_budget >= max_tokens:
             thinking_budget = max(0, max_tokens - 1)
             if thinking_budget < 1024:

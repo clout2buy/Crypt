@@ -7,9 +7,19 @@ from copy import deepcopy
 
 
 _SECRET_NAME_RE = re.compile(r"(key|token|secret|password|credential)", re.I)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?im)^(\s*(?:\d+\s*(?:\u2192|->|=>))?\s*[A-Z0-9_.-]*"
+    r"(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|APIKEY|AUTH(?:ORIZATION)?|"
+    r"CREDENTIAL|WEBHOOK|PRIVATE[_-]?KEY)"
+    r"[A-Z0-9_.-]*\s*[:=]\s*)(.+?)\s*$"
+)
 _GENERIC_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
+    re.compile(r"\b[MN][A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,}\b"),
 ]
 
 
@@ -17,6 +27,7 @@ def text(value: str) -> str:
     out = str(value)
     for secret in _env_secrets():
         out = out.replace(secret, "[redacted]")
+    out = _SECRET_ASSIGNMENT_RE.sub(r"\1[redacted]", out)
     for pattern in _GENERIC_PATTERNS:
         out = pattern.sub("[redacted]", out)
     return out

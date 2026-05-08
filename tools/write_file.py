@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import difflib
 
-from core import file_state
+from core import artifact_lifecycle, file_state
 
 from .fs import rel, resolve
 from .types import Tool
@@ -21,6 +21,7 @@ def run(args: dict) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(args["content"], encoding="utf-8")
     file_state.record_write(path)
+    artifact_lifecycle.record_write(path)
     return f"{'overwrote' if existed else 'created'} {rel(path)}"
 
 

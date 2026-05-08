@@ -9,7 +9,8 @@ from pathlib import Path
 
 from tools import REGISTRY
 
-from . import background, file_state, prompt, redact, session
+from . import background, evidence, file_state, final_claims, prompt, redact, session, tool_policy, verifiers
+from .agents import registry as agent_registry
 
 
 FORBIDDEN_IDENTITY = ("Claude " + "Code", "Claude " + "OAuth", "claude" + "-cli")
@@ -37,6 +38,11 @@ def run_doctor(cwd: str | Path) -> str:
         _check_app_dir_writable(),
         _check_provider_auth(),
         _check_known_model(),
+        _check_agent_registry(),
+        _check_evidence_ledger(),
+        _check_verifier_contract(),
+        _check_final_claim_guard(),
+        _check_tool_policy(),
     ]
     passed = sum(1 for c in checks if c.ok)
     lines = [f"Crypt doctor: {passed}/{len(checks)} checks passed"]
@@ -69,7 +75,17 @@ def _check_registry() -> Check:
     try:
         names = [item["name"] for item in REGISTRY.schemas()]
         sub = [item["name"] for item in REGISTRY.schemas(for_subagent=True)]
-        required = {"read_file", "edit_file", "bash_start", "web_fetch", "spawn_agent"}
+        required = {
+            "read_file",
+            "edit_file",
+            "bash_start",
+            "web_fetch",
+            "spawn_agent",
+            "list_agents",
+            "agent_output",
+            "send_agent_message",
+            "stop_agent",
+        }
         missing = sorted(required - set(names))
         if missing:
             return Check("tool registry", False, "missing " + ", ".join(missing))
@@ -79,6 +95,68 @@ def _check_registry() -> Check:
         return Check("tool registry", True, f"{len(names)} tools, {len(sub)} subagent tools")
     except Exception as e:
         return Check("tool registry", False, f"{type(e).__name__}: {e}")
+
+
+def _check_agent_registry() -> Check:
+    try:
+        names = set(agent_registry.agent_names())
+        required = {"explorer", "planner", "worker", "verifier", "ui_reviewer", "release_reviewer"}
+        missing = sorted(required - names)
+        if missing:
+            return Check("agent registry", False, "missing " + ", ".join(missing))
+        worker = agent_registry.get_agent("worker")
+        if worker.read_only or not worker.requires_write_paths:
+            return Check("agent registry", False, "worker contract is not scoped-write")
+        return Check("agent registry", True, f"{len(names)} agent types")
+    except Exception as e:
+        return Check("agent registry", False, f"{type(e).__name__}: {e}")
+
+
+def _check_evidence_ledger() -> Check:
+    try:
+        evidence.clear()
+        evidence.record_tool_result("bash", {"command": "python -m pytest -q tests/test_example.py"}, ok=True, output="1 passed")
+        ok = evidence.has_passing_verification()
+        return Check("evidence ledger", ok, evidence.evidence_summary(2))
+    except Exception as e:
+        return Check("evidence ledger", False, f"{type(e).__name__}: {e}")
+    finally:
+        evidence.clear()
+
+
+def _check_verifier_contract() -> Check:
+    try:
+        result = verifiers.parse_verifier_output("Command: python -m pytest -q\nVERDICT: PASS")
+        return Check("verifier contract", result.status == "PASS" and result.commands, result.status)
+    except Exception as e:
+        return Check("verifier contract", False, f"{type(e).__name__}: {e}")
+
+
+def _check_final_claim_guard() -> Check:
+    try:
+        evidence.clear()
+        guarded, note = final_claims.guard_text("Done, implemented.")
+        ok = bool(note and "unverified" in guarded)
+        return Check("final claim guard", ok)
+    except Exception as e:
+        return Check("final claim guard", False, f"{type(e).__name__}: {e}")
+    finally:
+        evidence.clear()
+
+
+def _check_tool_policy() -> Check:
+    try:
+        tool_policy.clear()
+        args = {"path": "doctor-artifact.html", "content": "<html></html>"}
+        first = tool_policy.preflight("write_file", args)
+        tool_policy.after_tool("write_file", args, ok=True)
+        second = tool_policy.preflight("write_file", args)
+        ok = first.action == tool_policy.ALLOW and second.action == tool_policy.WARN
+        return Check("tool policy", ok, second.reason if second.reason else "")
+    except Exception as e:
+        return Check("tool policy", False, f"{type(e).__name__}: {e}")
+    finally:
+        tool_policy.clear()
 
 
 def _check_session() -> Check:

@@ -52,6 +52,8 @@ _EXCLUDE_FILE_PATTERNS = {
     ".coverage",
 }
 _GENERATED_DIRS = {
+    "build",
+    "dist",
     "__pycache__",
     ".pytest_cache",
     ".ruff_cache",
@@ -62,6 +64,7 @@ _GENERATED_DIRS = {
 }
 _GENERATED_FILE_PATTERNS = {
     "*.pyc",
+    "*.egg-info",
     ".coverage",
     "coverage.xml",
 }
@@ -425,10 +428,10 @@ def _collect_generated_artifacts(root: Path) -> set[str]:
         return out
     for path in root.rglob("*"):
         rel = path.relative_to(root).as_posix()
-        if any(part in _GENERATED_DIRS for part in rel.split("/")):
+        if any(_is_generated_name(part) for part in rel.split("/")):
             out.add(rel)
             continue
-        if path.is_file() and any(fnmatch.fnmatchcase(path.name, pattern) for pattern in _GENERATED_FILE_PATTERNS):
+        if path.is_file() and _is_generated_name(path.name):
             out.add(rel)
     return out
 
@@ -625,10 +628,17 @@ def _is_test_path(path: str) -> bool:
 
 def _looks_generated(path: str) -> bool:
     parts = set(path.replace("\\", "/").split("/"))
-    if parts.intersection(_GENERATED_DIRS):
+    if any(_is_generated_name(part) for part in parts):
         return True
     name = path.rsplit("/", 1)[-1]
-    return any(fnmatch.fnmatchcase(name, pattern) for pattern in _GENERATED_FILE_PATTERNS)
+    return _is_generated_name(name)
+
+
+def _is_generated_name(name: str) -> bool:
+    return name in _GENERATED_DIRS or any(
+        fnmatch.fnmatchcase(name, pattern)
+        for pattern in _GENERATED_FILE_PATTERNS
+    )
 
 
 def _pyproject_changed_or_present(cwd: Path) -> bool:

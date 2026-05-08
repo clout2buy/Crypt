@@ -1,6 +1,11 @@
 # Local config & secrets
 .env
 .env.local
+.env.*
+*.env
+!.env.example
+local.env
+*.local
 
 # Python
 __pycache__/
@@ -19,6 +24,14 @@ env/
 .mypy_cache/
 .ruff_cache/
 .coverage
+*.log
+*.jsonl
+logs/
+bench-runs/
+target-evals/
+traces/
+runs/
+tasks/
 
 # Editor / OS
 .idea/
@@ -30,6 +43,8 @@ Thumbs.db
 # Local-only experiments not part of Crypt itself
 scratch/
 _stage/
+tmp_*.js
+dna.html
 
 # Generated test artifacts (live demos created during sessions, not source)
 holographic*.html

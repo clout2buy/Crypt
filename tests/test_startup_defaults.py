@@ -99,6 +99,13 @@ def test_ollama_auth_label_distinguishes_cloud_and_local(monkeypatch):
     assert local == "local Ollama"
 
 
+def test_ollama_host_normalization_classifies_bare_hosts():
+    assert settings.client_host("localhost:11434") == "http://localhost:11434"
+    assert settings.client_host("ollama.com") == "https://ollama.com"
+    assert settings.is_local_host("localhost:11434") is True
+    assert settings.is_ollama_cloud_host("ollama.com") is True
+
+
 def test_openai_codex_auth_label_uses_chatgpt_oauth(monkeypatch):
     _clear_provider_env(monkeypatch)
 

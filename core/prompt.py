@@ -76,6 +76,7 @@ def _workflow() -> str:
         - Gather context with dedicated read/search tools before shell commands.
         - Make small, reviewable edits and verify each phase before moving on.
         - For independent investigations, use subagents so raw exploration does not flood the main context.
+        - For broad repo understanding, audits, upgrade plans, architecture reviews, or "where are we at" requests, proactively spawn an explorer or planner agent. The user should not have to ask for agents by name.
         - For long-running commands, use background shell jobs instead of blocking the conversation.
         - Persist important cross-session facts with memory only when they will matter later.
         """
@@ -216,6 +217,9 @@ def _active_runtime() -> str:
     jobs = runtime.background_job_summaries()
     if jobs:
         parts.append("- Background jobs:\n" + "\n".join(f"  - {j}" for j in jobs))
+    agents = runtime.agent_task_summaries()
+    if agents:
+        parts.append("- Agent tasks:\n" + "\n".join(f"  - {j}" for j in agents))
     if not parts:
         return ""
     return "# Active Runtime\n" + "\n".join(parts)

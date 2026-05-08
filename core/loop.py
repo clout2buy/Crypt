@@ -7,7 +7,22 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
-from . import artifacts, background, compact, doctor, file_state, memory, prompt as prompt_builder, runtime
+from . import (
+    artifacts,
+    background,
+    compact,
+    doctor,
+    evidence,
+    file_state,
+    final_claims,
+    memory,
+    prompt as prompt_builder,
+    runtime,
+    tool_recovery,
+)
+from .agents import orchestrator
+from .agents import registry as agent_registry
+from . import verifiers
 from . import session as sessions
 from . import tracing, ui
 from .api import Provider, TextDelta, ThinkingDelta, ToolUseProgress, ToolUseReady, TurnEnd
@@ -73,8 +88,14 @@ def run_prompt(
     """
     previous_mode = runtime.approval_mode()
     previous_thinking = runtime.show_thinking()
+    evidence.clear()
     messages: list[dict] = session_obj.load_messages() if session_obj else []
-    runtime.configure(provider, cwd, lambda prompt, context=None: _run_subagent(provider, prompt, context), session=session_obj)
+    runtime.configure(
+        provider,
+        cwd,
+        lambda prompt, context=None, **kwargs: _run_subagent(provider, prompt, context, **kwargs),
+        session=session_obj,
+    )
     runtime.set_show_thinking(show_thinking)
     runtime.set_approval_mode(approval_mode)
     REGISTRY.before_prompt()
@@ -126,7 +147,12 @@ def run(
     messages: list[dict] = session_obj.load_messages() if session_obj else []
     current_tokens = 0
     session_tokens = compact.rough_tokens(messages) if messages else 0
-    runtime.configure(provider, cwd, lambda prompt, context=None: _run_subagent(provider, prompt, context), session=session_obj)
+    runtime.configure(
+        provider,
+        cwd,
+        lambda prompt, context=None, **kwargs: _run_subagent(provider, prompt, context, **kwargs),
+        session=session_obj,
+    )
     runtime.set_show_thinking(show_thinking)
     tracing.emit("session_start", mode="interactive", resumed=bool(messages), message_count=len(messages))
     if session_obj and messages:
@@ -155,7 +181,7 @@ def run(
                     runtime.configure(
                         provider,
                         runtime.cwd(),
-                        lambda prompt, context=None: _run_subagent(provider, prompt, context),
+                        lambda prompt, context=None, **kwargs: _run_subagent(provider, prompt, context, **kwargs),
                         session=runtime.session(),
                     )
                 continue
@@ -232,6 +258,7 @@ def run(
             continue
 
         checkpoint = len(messages)
+        evidence.clear()
         user_msg = {"role": "user", "content": user_text}
         messages.append(user_msg)
         if runtime.session():
@@ -264,7 +291,7 @@ def run(
                         runtime.configure(
                             provider,
                             runtime.cwd(),
-                            lambda prompt, context=None: _run_subagent(provider, prompt, context),
+                    lambda prompt, context=None, **kwargs: _run_subagent(provider, prompt, context, **kwargs),
                             session=runtime.session(),
                         )
 
@@ -292,6 +319,8 @@ def _run_until_done(
         artifact_text_retry_used = False
         artifact_stall_retry_used = False
         artifact_empty_retry_used = False
+        orchestration_text_retry_used = False
+        tool_failure_retry_used = False
         while used < budget:
             _ensure_tool_result_pairing(messages)
             if not is_subagent:
@@ -386,6 +415,32 @@ def _run_until_done(
             if not _has_tool_use(end.message):
                 if (
                     not is_subagent
+                    and not tool_failure_retry_used
+                    and tool_recovery.should_retry_after_tool_failure(messages, end.message)
+                ):
+                    tool_failure_retry_used = True
+                    correction = tool_recovery.recovery_message(messages)
+                    messages.append(correction)
+                    if runtime.session():
+                        runtime.session().append({"type": "message", "message": correction})
+                    if render:
+                        ui.info("recoverable tool argument failure; retrying with correction instead of stopping")
+                    continue
+                if (
+                    not is_subagent
+                    and not orchestration_text_retry_used
+                    and orchestrator.should_retry_text_only(messages, end.message)
+                ):
+                    orchestration_text_retry_used = True
+                    correction = orchestrator.tool_retry_message(messages)
+                    messages.append(correction)
+                    if runtime.session():
+                        runtime.session().append({"type": "message", "message": correction})
+                    if render:
+                        ui.info("repo audit request needs real tool/agent work; retrying with orchestration correction")
+                    continue
+                if (
+                    not is_subagent
                     and not artifact_text_retry_used
                     and artifacts.should_retry_text_only(messages, end.message)
                 ):
@@ -416,6 +471,12 @@ def _run_until_done(
                 if end.stop_reason == "max_tokens":
                     if render:
                         ui.info("response truncated at escalated cap - rephrase or split work")
+                if not is_subagent:
+                    note = final_claims.apply_to_message(end.message)
+                    if note:
+                        tracing.emit("final_claim_guard", note=note)
+                        if render and not getattr(end, "text_buffered", False):
+                            ui.info(note)
                 if not is_subagent:
                     _maybe_complete_todos_after_final(messages)
                 if render and getattr(end, "text_buffered", False):
@@ -517,31 +578,41 @@ def _maybe_shrink_context(provider: Provider, messages: list[dict], *, render: b
     return approx if changed else None
 
 
-def _run_subagent(provider: Provider, prompt: str, context: str | None = None) -> str:
+def _run_subagent(
+    provider: Provider,
+    prompt: str,
+    context: str | None = None,
+    *,
+    agent_type: str = "explorer",
+    write_paths: list[str] | None = None,
+    task_id: str | None = None,
+    worktree_path: str | None = None,
+) -> str:
     state = file_state.snapshot()
-    parts = [
-        "You are a Crypt research subagent. Work silently and return only a "
-        "concise final report. Use read-only tools only. Do not edit files, "
-        "ask the user questions, update todos, or claim verification you did "
-        "not run.",
-    ]
-    if context and context.strip():
-        # Parent already digested these facts; passing them avoids the
-        # subagent re-reading the same files. Treat as untrusted parent
-        # output, not the user's voice.
-        parts.append(
-            "<parent_context>\n"
-            + context.strip()
-            + "\n</parent_context>"
-        )
-    parts.append("<task>\n" + prompt + "\n</task>")
-    scoped_prompt = "\n\n".join(parts)
+    definition = agent_registry.get_agent(agent_type)
+    scoped_prompt = agent_registry.build_prompt(
+        definition,
+        prompt=prompt,
+        context=context,
+        write_paths=list(write_paths or []),
+    )
     messages: list[dict] = [{"role": "user", "content": scoped_prompt}]
     try:
-        _run_until_done(provider, messages, 0, 0, is_subagent=True, render=False)
-        return _extract_text(messages[-1] if messages else {})
+        with runtime.cwd_context(worktree_path):
+            with runtime.subagent_context(
+                agent_type=definition.name,
+                allowed_tools=definition.allowed_tools,
+                write_paths=list(write_paths or []),
+                task_id=task_id,
+            ):
+                _run_until_done(provider, messages, 0, 0, is_subagent=True, render=False)
+        text = _extract_text(messages[-1] if messages else {})
+        if definition.name == "verifier":
+            verifiers.record_verifier_output(text, task_id=task_id)
+        return text
     finally:
-        file_state.restore(state)
+        if definition.read_only:
+            file_state.restore(state)
 
 
 def _stream_one_turn(
@@ -579,7 +650,7 @@ def _stream_one_turn(
             model=getattr(provider, "model", "model"),
             cwd=runtime.cwd(),
             tool_guidance=REGISTRY.prompts(only={str(tool.get("name", "")) for tool in tools}),
-            turn_guidance=artifacts.fast_lane_system_guidance(messages) if artifact_fast_lane else "",
+            turn_guidance=_turn_guidance(messages, artifact_fast_lane=artifact_fast_lane),
         )
         for event in provider.stream_turn(messages, tools, system_prompt):
             event_at = time.monotonic()
@@ -783,9 +854,14 @@ class _SilentLoader:
 
 
 _ARTIFACT_FAST_LANE_BLOCKED_TOOLS = {
+    "agent_output",
     "ask_user",
+    "cleanup_agent",
+    "list_agents",
     "present_plan",
+    "send_agent_message",
     "spawn_agent",
+    "stop_agent",
     "todos",
 }
 
@@ -813,6 +889,16 @@ def _artifact_fast_lane_active(messages: list[dict], *, is_subagent: bool) -> bo
         return False
     successful = artifacts.successful_tool_names_since_last_request(messages)
     return not successful.intersection({"write_file", "edit_file", "multi_edit"})
+
+
+def _turn_guidance(messages: list[dict], *, artifact_fast_lane: bool) -> str:
+    chunks: list[str] = []
+    orch = orchestrator.guidance_for_turn(messages)
+    if orch:
+        chunks.append(orch)
+    if artifact_fast_lane:
+        chunks.append(artifacts.fast_lane_system_guidance(messages))
+    return "\n\n".join(chunks)
 
 
 def _dispatch_tool_uses(

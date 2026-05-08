@@ -15,20 +15,21 @@ from __future__ import annotations
 
 import re
 
-# Commands whose only effect is to read something out. If the whole pipeline
-# starts with one of these AND has no shell metacharacters, we auto-approve.
+# Commands whose only effect is process/system inspection. File-content
+# readers such as cat/type/Get-Content are intentionally excluded because
+# operand parsing is shell-specific and can otherwise bypass workspace
+# approval/secret boundaries.
 _SAFE_LEAD: frozenset[str] = frozenset({
     # POSIX-y
-    "ls", "pwd", "whoami", "id", "which", "type",
+    "ls", "pwd", "whoami", "id", "which",
     "echo", "printf",
-    "cat", "head", "tail", "wc", "file", "stat",
+    "wc", "file", "stat",
     "du", "df", "ps", "uname", "date", "uptime", "hostname",
-    "env", "printenv",
     "tree",
     "true", "false",
     # Windows cmd / PowerShell read-onlys
     "dir", "where", "ver",
-    "get-childitem", "get-content", "get-location", "get-process",
+    "get-childitem", "get-location", "get-process",
 })
 
 # git subcommands that never mutate the repo regardless of ordinary args.

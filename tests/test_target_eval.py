@@ -123,6 +123,25 @@ def test_cleanup_removes_only_new_generated_artifacts(tmp_path: Path):
     assert not new_cache.exists()
 
 
+def test_cleanup_removes_new_build_release_artifacts(tmp_path: Path):
+    root = tmp_path / "repo"
+    (root / "dist").mkdir(parents=True)
+    (root / "dist" / "demo.whl").write_bytes(b"wheel")
+    (root / "build").mkdir()
+    (root / "build" / "tmp.txt").write_text("build", encoding="utf-8")
+    (root / "demo.egg-info").mkdir()
+    (root / "demo.egg-info" / "PKG-INFO").write_text("metadata", encoding="utf-8")
+
+    removed = target_eval.cleanup_generated_artifacts(root, existing=set())
+
+    assert "dist" in removed
+    assert "build" in removed
+    assert "demo.egg-info" in removed
+    assert not (root / "dist").exists()
+    assert not (root / "build").exists()
+    assert not (root / "demo.egg-info").exists()
+
+
 class _WritesGeneratedArtifactProvider:
     name = "fake"
     model = "fake-model"

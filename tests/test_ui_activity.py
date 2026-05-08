@@ -11,13 +11,41 @@ def test_status_uses_real_activity_label(monkeypatch):
     ui._state["activity"] = "waiting for provider response"
     try:
         rendered = ui._build_status()
-        assert "waiting for provider response" in rendered.plain
-        assert "5s" in rendered.plain
+        assert "WAITING FOR PROVIDER RESPONSE" in rendered.plain
+        assert "[5s]" in rendered.plain
         assert "thinking" not in rendered.plain
         assert "writing" not in rendered.plain
     finally:
         ui._state["loader_start"] = 0.0
         ui._state["activity"] = "idle"
+
+
+def test_non_tty_confirm_returns_without_prompt(monkeypatch):
+    monkeypatch.setattr(ui.sys.stdin, "isatty", lambda: False)
+
+    approved, feedback = ui.confirm("run this?")
+
+    assert approved is False
+    assert "non-interactive" in feedback
+
+
+def test_non_tty_splash_choice_returns_default(monkeypatch):
+    monkeypatch.setattr(ui.sys.stdin, "isatty", lambda: False)
+
+    choice = ui.splash_choice("provider", [("a", "A"), ("b", "B")], default_idx=2)
+
+    assert choice == "b"
+
+
+def test_non_tty_welcome_uses_compact_line(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(ui.console, "print", lambda value="", *args, **kwargs: seen.append(str(value)))
+    monkeypatch.setattr(ui, "_is_animated_tty", lambda: False)
+
+    ui.welcome("ollama", "gpt-oss:20b", cwd="D:\\Crypt")
+
+    assert seen
+    assert seen[-1].startswith("Crypt ollama:gpt-oss:20b")
 
 
 def _reset_lifecycle():
@@ -44,7 +72,7 @@ def test_tool_lifecycle_state_transitions():
         ui.tool_begin("call_1", "bash", "echo hi")
         ui.tool_set_state("call_1", "running")
         assert ui._state["tool_lifecycle"]["call_1"]["state"] == "running"
-        assert ui._state["tool_lifecycle"]["call_1"]["detail"] == "running"
+        assert ui._state["tool_lifecycle"]["call_1"]["detail"] == "EXECUTING"
 
         ui.tool_set_state("call_1", "approval", "awaiting approval (rm -rf)")
         assert ui._state["tool_lifecycle"]["call_1"]["state"] == "approval"
@@ -93,8 +121,8 @@ def test_in_flight_render_shows_state_and_elapsed(monkeypatch):
         group = ui._build_in_flight_tools()
         assert group is not None
         plain = "\n".join(t.plain for t in group.renderables)
-        assert "running" in plain
-        assert "(3s)" in plain  # 107 - 104, NOT 107 - 100
+        assert "EXECUTING" in plain
+        assert "[3S]" in plain  # 107 - 104, NOT 107 - 100
     finally:
         _reset_lifecycle()
 
@@ -188,6 +216,298 @@ def test_status_includes_spinner(monkeypatch):
         ui._state["activity"] = "idle"
 
 
+def test_status_includes_matrix_signal(monkeypatch):
+    monkeypatch.setattr(ui.time, "monotonic", lambda: 105.0)
+    ui._state["loader_start"] = 100.0
+    ui._state["activity"] = "waiting for provider response"
+    try:
+        rendered = ui._build_status().plain
+        assert ui._matrix_signal(8) in rendered
+    finally:
+        ui._state["loader_start"] = 0.0
+        ui._state["activity"] = "idle"
+
+
+def test_matrix_rain_rows_are_sized_and_nonblank():
+    rows = ui._matrix_rain_rows(32, 4, frame=6)
+
+    assert len(rows) == 4
+    assert all(len(row.plain) == 34 for row in rows)
+    assert any(ch != " " for row in rows for ch in row.plain)
+
+
+def test_matrix_rain_rows_can_fill_full_width_without_indent():
+    rows = ui._matrix_rain_rows(32, 3, frame=6, indent=0)
+
+    assert len(rows) == 3
+    assert all(len(row.plain) == 32 for row in rows)
+
+
+def test_welcome_surface_fills_viewport_and_overlays_chrome():
+    surface = ui._welcome_surface(
+        "openai-codex",
+        "gpt-5.3-codex",
+        "oauth",
+        "operator@example.com",
+        "Plus",
+        "D:\\Crypt",
+        frame=6,
+    )
+
+    rows = list(surface.renderables)
+    plain = "\n".join(row.plain for row in rows)
+
+    assert len(rows) == ui._terminal_height() - 1
+    assert "CRYPT OPERATING CONSOLE" in plain
+    assert "MODEL" in plain
+    assert "/STATUS" in plain
+    assert any(ch != " " for row in rows for ch in row.plain)
+
+
+def test_matrix_surface_renderable_includes_prompt_row():
+    ui._state["surface_context"] = {
+        "provider": "openai-codex",
+        "model": "gpt-5.3-codex",
+        "auth_kind": "oauth",
+        "auth_email": "operator@example.com",
+        "auth_plan": "Plus",
+        "cwd": "D:\\Crypt",
+    }
+    ui._state["surface_input"] = "hack the planet"
+    try:
+        rendered = ui._MatrixSurfaceRenderable().__rich__()
+        rows = list(rendered.renderables)
+        assert len(rows) == ui._terminal_height()
+        assert "hack the planet" in rows[-1].plain
+    finally:
+        ui._state["surface_context"] = None
+        ui._state["surface_input"] = ""
+
+
+def test_prompt_pane_surface_is_compact_and_contains_input():
+    surface = ui._prompt_pane_surface("keep output visible", approval="auto-work", frame=6)
+    rows = list(surface.renderables)
+    plain = "\n".join(row.plain for row in rows)
+
+    assert 6 <= len(rows) <= 10
+    assert "COMMAND DOCK" in plain
+    assert "YOU" in rows[-1].plain
+    assert "AUTO" not in rows[-1].plain
+    assert "keep output visible" in rows[-1].plain
+
+
+def test_surface_live_stop_keeps_last_context():
+    ui._state["surface_context"] = {
+        "provider": "openai-codex",
+        "model": "gpt-5.3-codex",
+        "cwd": "D:\\Crypt",
+    }
+    ui._state["surface_live"] = None
+    ui._state["surface_last_context"] = None
+    try:
+        ui._surface_live_stop()
+        assert ui._state["surface_context"] is None
+        assert ui._state["surface_last_context"]["model"] == "gpt-5.3-codex"
+    finally:
+        ui._state["surface_context"] = None
+        ui._state["surface_last_context"] = None
+
+
+def test_resume_surface_for_prompt_starts_from_last_context(monkeypatch):
+    class FakeLive:
+        def __init__(self):
+            self.refreshed = False
+
+        def refresh(self):
+            self.refreshed = True
+
+    fake = FakeLive()
+    monkeypatch.setattr(ui, "_can_animate_input", lambda: True)
+    monkeypatch.setattr(ui, "_prompt_live_start", lambda context, yolo, approval: ui._state.update({
+        "surface_live": fake,
+        "surface_context": dict(context),
+        "surface_last_context": dict(context),
+        "surface_prompt_yolo": yolo,
+        "surface_prompt_approval": approval,
+    }) or fake)
+    ui._state["surface_live"] = None
+    ui._state["surface_last_context"] = {
+        "provider": "openai-codex",
+        "model": "gpt-5.3-codex",
+        "cwd": "D:\\Crypt",
+    }
+    try:
+        assert ui._resume_surface_for_prompt(False, "auto-work") is True
+        assert fake.refreshed is True
+        assert ui._state["surface_prompt_ready"] is True
+        assert ui._state["surface_prompt_approval"] == "auto-work"
+    finally:
+        ui._state["surface_live"] = None
+        ui._state["surface_context"] = None
+        ui._state["surface_last_context"] = None
+
+
+def test_choice_surface_fills_viewport_and_overlays_options():
+    surface = ui._choice_surface(
+        "provider",
+        [("anthropic", "Anthropic OAuth"), ("openai-codex", "ChatGPT OAuth (Codex)")],
+        2,
+        raw="2",
+        frame=6,
+    )
+
+    rows = list(surface.renderables)
+    plain = "\n".join(row.plain for row in rows)
+
+    assert len(rows) == ui._terminal_height()
+    assert "SETUP" in plain
+    assert "PROVIDER" in plain
+    assert "ChatGPT OAuth" in plain
+    assert "2" in plain
+
+
+def test_user_prompt_uses_reserved_surface_prompt_row(monkeypatch):
+    printed: list[str] = []
+    monkeypatch.setattr(ui.console, "print", lambda obj=None, *args, **kwargs: printed.append(getattr(obj, "plain", "")))
+    monkeypatch.setattr(ui.console, "input", lambda prompt: "scan target")
+    monkeypatch.setattr(ui, "_drain_buffered_lines", lambda timeout_ms=80: [])
+    ui._state["surface_prompt_ready"] = True
+    try:
+        assert ui.user_prompt() == "scan target"
+        assert not any("╶" in item for item in printed)
+    finally:
+        ui._state["surface_prompt_ready"] = False
+
+
+def test_drain_buffered_lines_waits_for_delayed_paste_tail(monkeypatch):
+    now = 0.0
+    chars = list("tail one\r\ncontinued")
+    release_at = 0.03
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def key_available() -> bool:
+        return bool(chars) and now >= release_at
+
+    def read_key() -> str:
+        return chars.pop(0)
+
+    monkeypatch.setattr(ui.os, "name", "nt", raising=False)
+    monkeypatch.setattr(ui.time, "monotonic", monotonic)
+    monkeypatch.setattr(ui.time, "sleep", sleep)
+    monkeypatch.setattr(ui, "_stdin_key_available", key_available)
+    monkeypatch.setattr(ui, "_read_stdin_key", read_key)
+
+    drained = ui._drain_buffered_lines(timeout_ms=80, quiet_ms=50, max_wait_ms=500)
+
+    assert drained == ["tail one", "continued"]
+    assert chars == []
+
+
+def test_drain_buffered_lines_extends_until_paste_is_quiet(monkeypatch):
+    now = 0.0
+    chars = list("one\r\ntwo\r\nthree")
+    next_release = 0.0
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def key_available() -> bool:
+        return bool(chars) and now >= next_release
+
+    def read_key() -> str:
+        nonlocal next_release
+        ch = chars.pop(0)
+        next_release = now + 0.03
+        return ch
+
+    monkeypatch.setattr(ui.os, "name", "nt", raising=False)
+    monkeypatch.setattr(ui.time, "monotonic", monotonic)
+    monkeypatch.setattr(ui.time, "sleep", sleep)
+    monkeypatch.setattr(ui, "_stdin_key_available", key_available)
+    monkeypatch.setattr(ui, "_read_stdin_key", read_key)
+
+    drained = ui._drain_buffered_lines(timeout_ms=20, quiet_ms=60, max_wait_ms=1000)
+
+    assert drained == ["one", "two", "three"]
+    assert chars == []
+
+
+def test_drain_buffered_lines_default_window_handles_slow_large_paste(monkeypatch):
+    now = 0.0
+    chars = list(("line\n" * 120).rstrip("\n"))
+    next_release = 0.0
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def key_available() -> bool:
+        return bool(chars) and now >= next_release
+
+    def read_key() -> str:
+        nonlocal next_release
+        ch = chars.pop(0)
+        next_release = now + 0.01
+        return ch
+
+    monkeypatch.setattr(ui.os, "name", "nt", raising=False)
+    monkeypatch.setattr(ui.time, "monotonic", monotonic)
+    monkeypatch.setattr(ui.time, "sleep", sleep)
+    monkeypatch.setattr(ui, "_stdin_key_available", key_available)
+    monkeypatch.setattr(ui, "_read_stdin_key", read_key)
+
+    drained = ui._drain_buffered_lines()
+
+    assert len(drained) == 120
+    assert chars == []
+
+
+def test_drain_buffered_lines_default_window_handles_very_large_slow_paste(monkeypatch):
+    now = 0.0
+    chars = list(("x\n" * 2000).rstrip("\n"))
+    next_release = 0.0
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def key_available() -> bool:
+        return bool(chars) and now >= next_release
+
+    def read_key() -> str:
+        nonlocal next_release
+        ch = chars.pop(0)
+        next_release = now + 0.01
+        return ch
+
+    monkeypatch.setattr(ui.os, "name", "nt", raising=False)
+    monkeypatch.setattr(ui.time, "monotonic", monotonic)
+    monkeypatch.setattr(ui.time, "sleep", sleep)
+    monkeypatch.setattr(ui, "_stdin_key_available", key_available)
+    monkeypatch.setattr(ui, "_read_stdin_key", read_key)
+
+    drained = ui._drain_buffered_lines()
+
+    assert len(drained) == 2000
+    assert chars == []
+
+
 def test_activity_does_not_refresh_when_label_is_unchanged(monkeypatch):
     class Live:
         def __init__(self):
@@ -217,8 +537,8 @@ def test_status_shows_abort_hint_after_long_wait(monkeypatch):
     ui._state["stream_chars"] = 0  # nothing received yet
     try:
         rendered = ui._build_status().plain
-        assert "Ctrl+C to abort" in rendered
-        assert "/model to switch" in rendered
+        assert "[CTRL+C] ABORT" in rendered
+        assert "[/MODEL] SWITCH" in rendered
     finally:
         ui._state["loader_start"] = 0.0
         ui._state["activity"] = "idle"
@@ -238,6 +558,35 @@ def test_status_hides_abort_hint_once_chunks_arrive(monkeypatch):
         ui._state["loader_start"] = 0.0
         ui._state["activity"] = "idle"
         ui._state["stream_chars"] = 0
+
+
+def test_status_hides_abort_hint_when_response_complete(monkeypatch):
+    monkeypatch.setattr(ui.time, "monotonic", lambda: 120.0)
+    ui._state["loader_start"] = 100.0
+    ui._state["activity"] = "response complete"
+    ui._state["stream_chars"] = 0
+    try:
+        rendered = ui._build_status().plain
+        assert "[CTRL+C] ABORT" not in rendered
+        assert "RESPONSE COMPLETE" in rendered
+    finally:
+        ui._state["loader_start"] = 0.0
+        ui._state["activity"] = "idle"
+        ui._state["stream_chars"] = 0
+
+
+def test_choice_surface_clears_background_after_option_text():
+    surface = ui._choice_surface(
+        "model",
+        [("gpt-5.5", "gpt-5.5"), ("spark", "gpt-5.3-codex-spark")],
+        1,
+        frame=6,
+    )
+
+    plain_rows = [row.plain for row in surface.renderables]
+    option = next(row for row in plain_rows if "gpt-5.5" in row)
+    suffix = option.split("gpt-5.5", 1)[1][:3]
+    assert "·" not in suffix
 
 
 def test_artifact_hidden_thinking_surfaces_collapsed_liveness(monkeypatch, workspace):
@@ -308,7 +657,8 @@ def test_tool_progress_renders_detail():
 
         assert rendered is not None
         plain = rendered.plain
-        assert "assembling write_file" in plain
+        assert "ARGUMENT STREAM" in plain
+        assert "WRITE_FILE" in plain
         assert "demo.html" in plain
         assert "80 line(s)" in plain
         assert "requestAnimationFrame" in plain
