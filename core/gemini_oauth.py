@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import webbrowser
+import wsgiref.simple_server
 from pathlib import Path
 
 from .settings import APP_DIR, GEMINI_OAUTH_SCOPES, restrict_file_permissions
@@ -33,6 +35,46 @@ def _client_secret_project_id(path: Path) -> str:
     return str(data.get("project_id") or "")
 
 
+def _run_oauth_local_server(flow, *, on_status=None):
+    from google_auth_oauthlib.flow import WSGITimeoutError, _RedirectWSGIApp, _WSGIRequestHandler
+
+    wsgi_app = _RedirectWSGIApp("The authentication flow has completed. You may close this window.")
+    wsgiref.simple_server.WSGIServer.allow_reuse_address = False
+    local_server = wsgiref.simple_server.make_server(
+        "127.0.0.1",
+        0,
+        wsgi_app,
+        handler_class=_WSGIRequestHandler,
+    )
+    try:
+        flow.redirect_uri = f"http://127.0.0.1:{local_server.server_port}/"
+        auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+
+        opened = False
+        try:
+            opened = webbrowser.open(auth_url, new=1, autoraise=True)
+        except Exception as exc:
+            if on_status:
+                on_status(f"browser open failed: {exc}")
+        if on_status:
+            if opened:
+                on_status("opened browser for Google OAuth")
+            else:
+                on_status("browser did not open automatically; open this URL:")
+                on_status(auth_url)
+
+        local_server.timeout = 600
+        local_server.handle_request()
+        try:
+            authorization_response = wsgi_app.last_request_uri.replace("http", "https")
+        except AttributeError as exc:
+            raise WSGITimeoutError("Timed out waiting for Google OAuth browser callback") from exc
+        flow.fetch_token(authorization_response=authorization_response)
+    finally:
+        local_server.server_close()
+    return flow.credentials
+
+
 def login(on_status=None) -> dict:
     """Run Google's desktop OAuth flow and return serializable credentials."""
     try:
@@ -52,12 +94,7 @@ def login(on_status=None) -> dict:
     if on_status:
         on_status(f"opening Google OAuth flow using {path}")
     flow = InstalledAppFlow.from_client_secrets_file(str(path), scopes=list(GEMINI_OAUTH_SCOPES))
-    creds = flow.run_local_server(
-        port=0,
-        open_browser=True,
-        prompt="consent",
-        access_type="offline",
-    )
+    creds = _run_oauth_local_server(flow, on_status=on_status)
     data = json.loads(creds.to_json())
     data["scopes"] = list(GEMINI_OAUTH_SCOPES)
     project_id = os.getenv("GEMINI_PROJECT_ID") or _client_secret_project_id(path) or data.get("quota_project_id") or ""

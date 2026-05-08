@@ -99,6 +99,9 @@ def main() -> int:
         provider_name, model_override = _startup_choice(saved, args, skip=did_setup)
         cred = _credential(provider_name)
         cred = _login_if_needed(provider_name, cred, interactive=sys.stdin.isatty())
+        if not _credential_is_usable(provider_name, cred):
+            ui.error(_provider_missing_auth_message(provider_name))
+            return 1
         provider = _provider(args, saved, provider_name, cred, model_override)
         _save_runtime_choice(args, saved, provider_name, provider.model, cwd)
         session_obj = _session_for_startup(args, cwd, provider)
@@ -109,6 +112,8 @@ def main() -> int:
             nonlocal saved, provider_name, model_override, cred, provider
 
             saved = settings.load_config()
+            previous_provider_name = provider_name
+            previous_model_override = model_override
             ui.info("switch provider/model")
             provider_name = _pick(
                 "provider",
@@ -134,6 +139,11 @@ def main() -> int:
 
             cred = _credential(provider_name)
             cred = _login_if_needed(provider_name, cred, interactive=sys.stdin.isatty())
+            if not _credential_is_usable(provider_name, cred):
+                ui.error(_provider_missing_auth_message(provider_name))
+                provider_name = previous_provider_name
+                model_override = previous_model_override
+                return active_provider
 
             provider = _provider(args, saved, provider_name, cred, model_override)
             _save_runtime_choice(args, saved, provider_name, provider.model, Path(runtime.cwd()))
@@ -285,7 +295,8 @@ def _do_setup(saved: dict, args: argparse.Namespace) -> dict:
         and not auth.resolve_gemini()
         and ui.ask("log in to Gemini with Google OAuth now?")
     ):
-        _do_login(provider)
+        if _do_login(provider) != 0:
+            ui.info("Gemini setup is saved, but auth is not complete yet.")
     return new_saved
 
 
