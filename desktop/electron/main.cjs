@@ -6,7 +6,8 @@ const { spawn } = require("node:child_process");
 const isDev = !app.isPackaged;
 const forceBuilt = process.env.CRYPT_ELECTRON_BUILT === "1";
 const useDevServer = isDev && !forceBuilt && process.argv.includes("--dev");
-const repoRoot = path.resolve(__dirname, "..");
+const desktopRoot = path.resolve(__dirname, "..");
+const projectRoot = path.resolve(desktopRoot, "..");
 
 let mainWindow = null;
 let daemon = null;
@@ -18,12 +19,12 @@ function createWindow() {
     height: 920,
     minWidth: 980,
     minHeight: 760,
-    backgroundColor: "#050506",
+    backgroundColor: "#1f1f1e",
     title: "Crypt",
-    icon: path.join(repoRoot, "electron", "assets", "crypt-logo.svg"),
+    icon: path.join(desktopRoot, "electron", "assets", "crypt-logo.svg"),
     titleBarStyle: "hidden",
     titleBarOverlay: {
-      color: "#050506",
+      color: "#1f1f1e",
       symbolColor: "#ededf0",
       height: 40
     },
@@ -40,7 +41,7 @@ function createWindow() {
   if (useDevServer) {
     mainWindow.loadURL("http://127.0.0.1:5173");
   } else {
-    mainWindow.loadFile(path.join(repoRoot, "app", "dist", "index.html"));
+    mainWindow.loadFile(path.join(desktopRoot, "renderer", "dist", "index.html"));
   }
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
@@ -185,7 +186,7 @@ function backendCwd() {
     return process.env.CRYPT_BACKEND_ROOT;
   }
   if (!app.isPackaged) {
-    return repoRoot;
+    return projectRoot;
   }
   return app.getPath("home");
 }

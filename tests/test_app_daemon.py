@@ -109,6 +109,46 @@ def test_app_daemon_route_factory_maps_worker_to_builder(monkeypatch, tmp_path):
     assert provider.model == "qwen2.5-coder:14b"
 
 
+def test_app_daemon_timeline_events_render_tool_cards():
+    events = app_daemon._timeline_events(
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-1",
+                        "name": "read_file",
+                        "input": {"path": "README.md"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool-1",
+                        "content": "ok",
+                        "is_error": False,
+                    }
+                ],
+            },
+        ]
+    )
+
+    assert events[0]["event"] == "toolCall"
+    assert events[0]["tool"] == "read_file"
+    assert "README.md" in events[0]["text"]
+    assert events[1]["event"] == "toolResult"
+    assert events[1]["ok"] is True
+
+
+def test_desktop_ollama_cloud_selection_uses_cloud_host():
+    assert app_daemon._desktop_ollama_host("glm-5.1:cloud", {}) == "https://ollama.com"
+    assert app_daemon._desktop_ollama_host("qwen2.5-coder:14b", {}) == settings.OLLAMA_HOST
+
+
 def test_app_daemon_routes_slash_status_to_command_result(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
     events: list[dict] = []

@@ -94,7 +94,8 @@ class AppDaemon:
             if text.startswith("/"):
                 self._run_command(text[1:], request_id=cid)
                 return
-            self._start_prompt(text, request_id=cid)
+            route_role = str(command.get("route") or "").strip().lower() or None
+            self._start_prompt(text, request_id=cid, route_role=route_role)
             return
         self.emit("error", id=cid, error=f"unknown command: {ctype or '<missing>'}")
 
@@ -130,33 +131,44 @@ class AppDaemon:
         with self._write_lock:
             print(json.dumps(event, ensure_ascii=False), flush=True)
 
-    def _start_prompt(self, text: str, *, request_id: str) -> None:
+    def _start_prompt(self, text: str, *, request_id: str, route_role: str | None = None) -> None:
         with self._task_lock:
             if self._active_task:
                 self.emit("error", id=request_id, error=f"task already running: {self._active_task}")
+                return
+            if route_role and route_role not in ROUTE_ROLES:
+                self.emit("error", id=request_id, error=f"unknown route role: {route_role}")
                 return
             task_id = request_id or uuid.uuid4().hex
             self._active_task = task_id
         worker = threading.Thread(
             target=self._run_prompt_task,
-            args=(task_id, text),
+            args=(task_id, text, route_role),
             daemon=True,
             name=f"crypt-app-{task_id[:8]}",
         )
         worker.start()
 
-    def _run_prompt_task(self, task_id: str, text: str) -> None:
+    def _run_prompt_task(self, task_id: str, text: str, route_role: str | None) -> None:
         self.emit("taskStarted", id=task_id, prompt=text, snapshot=self.snapshot())
         try:
             saved = settings.load_config()
             provider_name = settings.provider_default(saved)
             cred = _credential(provider_name)
-            if not _credential_is_usable(provider_name, cred):
-                raise RuntimeError(_provider_missing_auth_message(provider_name))
-            self.emit("taskProgress", id=task_id, phase="provider", text=f"{provider_name} / {settings.model_default(provider_name, saved)}")
-            provider = _provider(saved, provider_name, cred)
+            if route_role:
+                route = _route_lookup(saved, route_role)
+                if not route:
+                    raise RuntimeError(f"route not found: {route_role}")
+                provider = _provider_from_route(saved, route)
+                provider_name = provider.name
+            else:
+                if not _credential_is_usable(provider_name, cred):
+                    raise RuntimeError(_provider_missing_auth_message(provider_name))
+                provider = _provider(saved, provider_name, cred)
+            self.emit("taskProgress", id=task_id, phase="provider", text=f"{provider.name} / {provider.model}")
             if self._session is None:
                 self._session = sessions.Session(self._cwd, provider=provider.name, model=provider.model)
+            existing_messages = len(self._session.load_messages())
             self.emit("taskProgress", id=task_id, phase="running", text="engine started")
             result = loop.run_prompt(
                 provider,
@@ -168,6 +180,8 @@ class AppDaemon:
                 render=False,
                 subagent_provider_factory=lambda agent_type: _provider_for_route(saved, agent_type, fallback=provider),
             )
+            for event in _timeline_events(result.messages[existing_messages:]):
+                self.emit(**event)
             self.emit(
                 "taskFinished",
                 id=task_id,
@@ -345,7 +359,10 @@ def _provider_from_route(saved: dict, route: dict):
     cred = _credential(provider_name)
     if not _credential_is_usable(provider_name, cred):
         raise RuntimeError(f"route {route.get('role')} cannot run: {_provider_missing_auth_message(provider_name)}")
-    return _provider(saved, provider_name, cred, model_override=model or None)
+    route_saved = dict(saved)
+    if provider_name == settings.PROVIDER_OLLAMA and model:
+        route_saved["ollama_host"] = _desktop_ollama_host(model, saved)
+    return _provider(route_saved, provider_name, cred, model_override=model or None)
 
 
 def _route_lookup(saved: dict, role: str) -> dict | None:
@@ -383,8 +400,17 @@ def _save_provider_model(saved: dict, provider_name: str, model: str, cwd: Path)
             values["gemini_location"] = location
     else:
         values["ollama_model"] = model
-        values["ollama_host"] = settings.ollama_host_for_model(model, settings.ollama_host(saved=saved))
+        values["ollama_host"] = _desktop_ollama_host(model, saved)
     return settings.update_config(**values)
+
+
+def _desktop_ollama_host(model: str, saved: dict) -> str:
+    if settings.is_ollama_cloud_model(model):
+        return "https://ollama.com"
+    saved_host = str(saved.get("ollama_host") or "")
+    if saved_host and not settings.is_ollama_cloud_host(saved_host):
+        return settings.client_host(saved_host)
+    return settings.OLLAMA_HOST
 
 
 def _auth_label(provider_name: str, cred: auth.Credential | None) -> str:
@@ -433,6 +459,10 @@ def _provider_inventory(saved: dict) -> list[dict]:
             "Ollama local/cloud",
             settings.ollama_models_for_host(settings.ollama_host(saved=saved)),
             status="ready",
+            model_groups=[
+                {"id": "local", "label": "Local", "models": list(settings.OLLAMA_LOCAL_MODELS)},
+                {"id": "cloud", "label": "Cloud", "models": list(settings.OLLAMA_CLOUD_MODELS)},
+            ],
         ),
     ]
 
@@ -444,11 +474,13 @@ def _provider_row(
     *,
     status: str,
     note: str = "",
+    model_groups: list[dict] | None = None,
 ) -> dict:
     return {
         "id": provider_id,
         "label": label,
         "models": list(models),
+        "modelGroups": model_groups or [{"id": "default", "label": "Models", "models": list(models)}],
         "status": status,
         "note": note,
     }
@@ -517,6 +549,70 @@ def _help_text() -> str:
             "/thinking - toggle thinking display",
         ]
     )
+
+
+def _timeline_events(messages: list[dict]) -> list[dict]:
+    events: list[dict] = []
+    names_by_id: dict[str, str] = {}
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role == "assistant":
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                call_id = str(block.get("id") or "")
+                name = str(block.get("name") or "tool")
+                names_by_id[call_id] = name
+                events.append(
+                    {
+                        "event": "toolCall",
+                        "tool": name,
+                        "callId": call_id,
+                        "args": block.get("input") or {},
+                        "text": _tool_call_text(name, block.get("input") or {}),
+                    }
+                )
+        elif role == "user":
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                call_id = str(block.get("tool_use_id") or "")
+                tool_name = names_by_id.get(call_id, "tool")
+                is_error = bool(block.get("is_error"))
+                events.append(
+                    {
+                        "event": "toolResult",
+                        "tool": tool_name,
+                        "callId": call_id,
+                        "ok": not is_error,
+                        "text": _tool_result_text(tool_name, block.get("content"), is_error=is_error),
+                    }
+                )
+    return events
+
+
+def _tool_call_text(name: str, args: object) -> str:
+    if name == "spawn_agent" and isinstance(args, dict):
+        agent = args.get("agent_type") or "agent"
+        desc = args.get("description") or args.get("prompt") or "subagent"
+        return f"{agent}: {desc}"
+    if isinstance(args, dict):
+        target = args.get("path") or args.get("command") or args.get("query") or args.get("description")
+        if target:
+            return f"{name}: {target}"
+    return name
+
+
+def _tool_result_text(name: str, content: object, *, is_error: bool) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return f"{name} {'failed' if is_error else 'completed'}"
+    lines = text.splitlines()
+    preview = "\n".join(lines[:5])
+    if len(preview) > 900:
+        preview = preview[:900].rstrip() + "..."
+    return preview
 
 
 def _redact_payload(value):

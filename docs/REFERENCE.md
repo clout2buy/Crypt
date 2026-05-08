@@ -32,9 +32,9 @@ and renders the daemon's structured events.
 
 | Command | Purpose |
 |---|---|
-| `npm install` | Install Electron/Vite/React dependencies |
-| `npm run electron:dev` | Run Vite and Electron together for development |
-| `npm run electron:preview` | Build the renderer and open the desktop shell |
+| `npm --prefix desktop install` | Install Electron/Vite/React dependencies |
+| `npm --prefix desktop run electron:dev` | Run Vite and Electron together for development |
+| `npm --prefix desktop run electron:preview` | Build the renderer and open the desktop shell |
 | `python -m crypt app-daemon` | Start the JSONL backend bridge directly |
 
 Set `CRYPT_PYTHON` if Electron should use a specific Python executable. Set
