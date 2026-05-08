@@ -6,6 +6,7 @@ import os
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from typing import Callable
 
 from . import (
     artifacts,
@@ -27,6 +28,35 @@ from . import session as sessions
 from . import tracing, ui
 from .api import Provider, TextDelta, ThinkingDelta, ToolUseProgress, ToolUseReady, TurnEnd
 from tools import REGISTRY, dispatch
+
+EventSink = Callable[[dict], None]
+
+
+def _emit_event(event_sink: EventSink | None, payload: dict) -> None:
+    if event_sink is None:
+        return
+    try:
+        event_sink(payload)
+    except Exception as exc:
+        tracing.emit(
+            "event_sink_error",
+            error=f"{type(exc).__name__}: {exc}",
+            event=payload.get("event", ""),
+        )
+
+
+def _event_text_preview(value, *, limit: int = 4000) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, indent=2)
+        except TypeError:
+            text = str(value)
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}\n... truncated {len(text) - limit:,} chars"
 
 
 class ReasoningStallError(RuntimeError):
@@ -80,6 +110,7 @@ def run_prompt(
     show_thinking: bool = False,
     render: bool = False,
     subagent_provider_factory=None,
+    event_sink: EventSink | None = None,
 ) -> RunResult:
     """Run one prompt to completion without the interactive input loop.
 
@@ -120,6 +151,7 @@ def run_prompt(
             compact.rough_tokens(messages),
             max_turns=max_turns,
             render=render,
+            event_sink=event_sink,
         )
         final_text = _extract_text(messages[-1]) if messages else ""
         tracing.emit(
@@ -312,6 +344,7 @@ def _run_until_done(
     max_turns: int = 50,
     is_subagent: bool = False,
     render: bool = True,
+    event_sink: EventSink | None = None,
 ) -> tuple[int, int]:
     loader = ui.Loader(base_tokens=current_tokens) if render else _SilentLoader()
     if render:
@@ -356,6 +389,7 @@ def _run_until_done(
                     loader,
                     render=render,
                     artifact_fast_lane=artifact_fast_lane,
+                    event_sink=event_sink,
                 )
             except ReasoningStallError:
                 if (
@@ -517,6 +551,7 @@ def _run_until_done(
                     messages,
                     record=not is_subagent,
                     render=render,
+                    event_sink=event_sink,
                 )
             _ensure_tool_result_pairing(messages)
 
@@ -631,6 +666,7 @@ def _stream_one_turn(
     *,
     render: bool = True,
     artifact_fast_lane: bool = False,
+    event_sink: EventSink | None = None,
 ) -> TurnEnd:
     show_thinking = runtime.show_thinking() if render else False
     thinking_open = False
@@ -639,7 +675,7 @@ def _stream_one_turn(
     text_open = False
     buffer_artifact_text = render and artifacts.creation_requested(messages)
     buffered_text: list[str] = []
-    streaming_tools = _StreamingToolExecutor(render=render)
+    streaming_tools = _StreamingToolExecutor(render=render, event_sink=event_sink)
     latest_tool_message: dict | None = None
     stream_started_at = time.monotonic()
     last_event_at: float | None = None
@@ -721,6 +757,16 @@ def _stream_one_turn(
                 ui.thinking_chunk(event.text)
             elif isinstance(event, ToolUseProgress):
                 thinking_started_at = None
+                _emit_event(
+                    event_sink,
+                    {
+                        "event": "toolProgress",
+                        "tool": event.name,
+                        "callId": event.call_id,
+                        "argumentChars": event.argument_chars,
+                        "text": _tool_progress_detail(event),
+                    },
+                )
                 if render:
                     ui.activity(f"receiving tool args: {event.name}")
                     ui.tool_progress(
@@ -732,6 +778,7 @@ def _stream_one_turn(
                     )
             elif isinstance(event, TextDelta):
                 thinking_started_at = None
+                _emit_event(event_sink, {"event": "assistantDelta", "text": event.text})
                 if not render:
                     continue
                 ui.activity("receiving text stream")
@@ -915,6 +962,7 @@ def _dispatch_tool_uses(
     messages: list[dict],
     record: bool = True,
     render: bool = True,
+    event_sink: EventSink | None = None,
 ) -> None:
     results: list[dict] = []
     tool_blocks = [
@@ -929,28 +977,31 @@ def _dispatch_tool_uses(
             if render:
                 ui.info("sequential execution: OAuth concurrency is restricted")
             for block in tool_blocks:
-                ok, output = _dispatch_one(block, render=render)
+                ok, output = _dispatch_one(block, render=render, event_sink=event_sink)
                 results.append(_tool_result_block(block, ok, output))
         else:
-            results = _dispatch_parallel(tool_blocks, render=render)
+            results = _dispatch_parallel(tool_blocks, render=render, event_sink=event_sink)
     else:
         for idx, block in enumerate(tool_blocks):
             if render:
                 ui.activity(f"executing tool: {block.get('name', 'tool')}")
-            ok, output = _dispatch_one(block, render=render)
+            ok, output = _dispatch_one(block, render=render, event_sink=event_sink)
             results.append(_tool_result_block(block, ok, output))
             if _should_abort_tool_batch(ok, output):
                 skipped = tool_blocks[idx + 1:]
                 for pending in skipped:
-                    results.append({
-                        "type": "tool_result",
-                        "tool_use_id": pending["id"],
-                        "content": (
-                            "skipped: previous tool failed or was denied. "
-                            "Read the failure/feedback and choose the next step."
-                        ),
-                        "is_error": True,
-                    })
+                    skipped_result = _skipped_tool_result(pending)
+                    results.append(skipped_result)
+                    _emit_event(
+                        event_sink,
+                        {
+                            "event": "toolResult",
+                            "tool": str(pending.get("name") or "tool"),
+                            "callId": str(pending.get("id") or ""),
+                            "ok": False,
+                            "text": _event_text_preview(skipped_result.get("content", "")),
+                        },
+                    )
                 if skipped and render:
                     ui.info(f"skipped {len(skipped)} queued tool call(s) after failure")
                 break
@@ -991,8 +1042,9 @@ class _StreamingToolExecutor:
     provider continues sending later blocks and message_stop.
     """
 
-    def __init__(self, *, render: bool) -> None:
+    def __init__(self, *, render: bool, event_sink: EventSink | None = None) -> None:
         self._render = render
+        self._event_sink = event_sink
         self._queue: list[dict] = []
         self._order: list[dict] = []
         self._running: dict[str, _RunningTool] = {}
@@ -1008,6 +1060,16 @@ class _StreamingToolExecutor:
         self._seen.add(tool_id)
         self._order.append(block)
         self._queue.append(block)
+        _emit_event(
+            self._event_sink,
+            {
+                "event": "toolCall",
+                "tool": str(block.get("name") or "tool"),
+                "callId": tool_id,
+                "args": block.get("input") if isinstance(block.get("input"), dict) else None,
+                "text": _tool_summary(block),
+            },
+        )
         self._pump()
 
     def finish(self) -> list[dict]:
@@ -1016,9 +1078,20 @@ class _StreamingToolExecutor:
             if self._queue and not self._running:
                 block = self._queue.pop(0)
                 if self._aborted:
-                    self._results[str(block.get("id") or "")] = _skipped_tool_result(block)
+                    skipped = _skipped_tool_result(block)
+                    self._results[str(block.get("id") or "")] = skipped
+                    _emit_event(
+                        self._event_sink,
+                        {
+                            "event": "toolResult",
+                            "tool": str(block.get("name") or "tool"),
+                            "callId": str(block.get("id") or ""),
+                            "ok": False,
+                            "text": _event_text_preview(skipped.get("content", "")),
+                        },
+                    )
                     continue
-                ok, output = _dispatch_one(block, render=self._render)
+                ok, output = _dispatch_one(block, render=self._render, event_sink=self._event_sink)
                 self._results[str(block.get("id") or "")] = _tool_result_block(block, ok, output)
                 if _should_abort_tool_batch(ok, output):
                     self._aborted = True
@@ -1057,7 +1130,7 @@ class _StreamingToolExecutor:
             ui.tool_progress_clear()
             ui.tool_begin(tool_id, str(block.get("name") or "tool"), _tool_summary(block))
             ui.tool_set_state(tool_id, "running")
-        future = self._pool.submit(_dispatch_one, block, render=False)
+        future = self._pool.submit(_dispatch_one, block, render=False, event_sink=self._event_sink)
         self._running[tool_id] = _RunningTool(block=block, future=future, parallel_safe=parallel_safe)
 
     def _complete_finished(self, *, wait_for_one: bool) -> None:
@@ -1074,6 +1147,16 @@ class _StreamingToolExecutor:
                 ok, output = item.future.result()
             except Exception as exc:
                 ok, output = False, f"{type(exc).__name__}: {exc}"
+                _emit_event(
+                    self._event_sink,
+                    {
+                        "event": "toolResult",
+                        "tool": str(item.block.get("name") or "tool"),
+                        "callId": tool_id,
+                        "ok": False,
+                        "text": _event_text_preview(output),
+                    },
+                )
             self._results[tool_id] = _tool_result_block(item.block, ok, output)
             if self._render:
                 ui.tool_end(tool_id, ok=ok, output=str(output))
@@ -1272,7 +1355,12 @@ def _can_dispatch_parallel(tool_blocks: list[dict]) -> bool:
     return True
 
 
-def _dispatch_parallel(tool_blocks: list[dict], *, render: bool) -> list[dict]:
+def _dispatch_parallel(
+    tool_blocks: list[dict],
+    *,
+    render: bool,
+    event_sink: EventSink | None = None,
+) -> list[dict]:
     workers = min(8, len(tool_blocks))
     if render:
         names = ", ".join(str(block.get("name", "")) for block in tool_blocks)
@@ -1280,7 +1368,7 @@ def _dispatch_parallel(tool_blocks: list[dict], *, render: bool) -> list[dict]:
         ui.info(f"running {len(tool_blocks)} parallel-safe tool calls: {names}")
 
     def run_one(block: dict) -> dict:
-        ok, output = _dispatch_one(block, render=False)
+        ok, output = _dispatch_one(block, render=False, event_sink=event_sink)
         return _tool_result_block(block, ok, output)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -1292,10 +1380,25 @@ def _dispatch_parallel(tool_blocks: list[dict], *, render: bool) -> list[dict]:
     return results
 
 
-def _dispatch_one(block: dict, *, render: bool) -> tuple[bool, str]:
+def _dispatch_one(
+    block: dict,
+    *,
+    render: bool,
+    event_sink: EventSink | None = None,
+) -> tuple[bool, str]:
     tool_name = str(block.get("name", ""))
     tool_id = str(block.get("id", ""))
     args = block.get("input") or {}
+    _emit_event(
+        event_sink,
+        {
+            "event": "toolStarted",
+            "tool": tool_name,
+            "callId": tool_id,
+            "args": args if isinstance(args, dict) else None,
+            "text": _tool_summary(block),
+        },
+    )
     tracing.emit("tool_start", tool_id=tool_id, tool=tool_name, args=args)
     started = time.perf_counter()
     ok, output = dispatch(
@@ -1311,6 +1414,16 @@ def _dispatch_one(block: dict, *, render: bool) -> tuple[bool, str]:
         ok=ok,
         duration_ms=int((time.perf_counter() - started) * 1000),
         output=str(output)[:1000],
+    )
+    _emit_event(
+        event_sink,
+        {
+            "event": "toolResult",
+            "tool": tool_name,
+            "callId": tool_id,
+            "ok": ok,
+            "text": _event_text_preview(output),
+        },
     )
     return ok, output
 
@@ -1370,6 +1483,7 @@ def _stream_with_retry(
     *,
     render: bool = True,
     artifact_fast_lane: bool = False,
+    event_sink: EventSink | None = None,
 ) -> TurnEnd:
     """Run one turn; on transient failure, back off and retry. The live
     region stays running across retries — the wait just shows above it."""
@@ -1383,6 +1497,7 @@ def _stream_with_retry(
                 loader,
                 render=render,
                 artifact_fast_lane=artifact_fast_lane,
+                event_sink=event_sink,
             )
         except Exception as e:
             last_err = e

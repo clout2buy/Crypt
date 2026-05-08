@@ -38,7 +38,7 @@ export function App() {
       top: transcriptRef.current.scrollHeight,
       behavior: "smooth"
     });
-  }, [events.length]);
+  }, [events]);
 
   const send = (command) => window.crypt?.send(command);
   const running = Boolean(snapshot?.activeTask);

@@ -31,7 +31,6 @@ const HIDDEN_CHAT_EVENTS = new Set([
   "sessionReset",
   "taskStarted",
   "taskProgress",
-  "toolCall",
   "daemonRestarting"
 ]);
 
@@ -121,7 +120,7 @@ function EventBubble({ event }) {
   return (
     <div className={`message-row ${event.tone}`}>
       <div className="avatar"><Icon size={16} /></div>
-      <article className={event.event === "toolCall" || event.event === "toolResult" ? "message-card tool-card" : "message-card"}>
+      <article className={event.event === "tool" ? "message-card tool-card" : "message-card"}>
         <header>
           <strong>{event.label}</strong>
           <time>{event.time}</time>

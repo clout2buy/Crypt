@@ -168,8 +168,13 @@ class AppDaemon:
             self.emit("taskProgress", id=task_id, phase="provider", text=f"{provider.name} / {provider.model}")
             if self._session is None:
                 self._session = sessions.Session(self._cwd, provider=provider.name, model=provider.model)
-            existing_messages = len(self._session.load_messages())
             self.emit("taskProgress", id=task_id, phase="running", text="engine started")
+
+            def emit_live(payload: dict) -> None:
+                event = str(payload.get("event") or "event")
+                data = {key: value for key, value in payload.items() if key != "event"}
+                self.emit(event, id=task_id, **data)
+
             result = loop.run_prompt(
                 provider,
                 text,
@@ -179,9 +184,8 @@ class AppDaemon:
                 show_thinking=runtime.show_thinking(),
                 render=False,
                 subagent_provider_factory=lambda agent_type: _provider_for_route(saved, agent_type, fallback=provider),
+                event_sink=emit_live,
             )
-            for event in _timeline_events(result.messages[existing_messages:]):
-                self.emit(**event)
             self.emit(
                 "taskFinished",
                 id=task_id,

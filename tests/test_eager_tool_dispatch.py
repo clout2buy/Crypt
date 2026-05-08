@@ -60,6 +60,73 @@ def test_stream_one_turn_cuts_over_to_ready_tool(workspace):
     assert end.message["content"][1]["input"] == {"path": "README.md"}
 
 
+def test_stream_one_turn_emits_text_deltas_to_event_sink(workspace):
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def stream_turn(self, messages, tools, system):
+            yield TextDelta("hello")
+            yield TextDelta(" world")
+            yield TurnEnd(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"type": "text", "text": "hello world"}]},
+            )
+
+    events: list[dict] = []
+    provider = Provider()
+    runtime.configure(provider, str(workspace), session=None)
+
+    loop._stream_one_turn(
+        provider,
+        messages=[{"role": "user", "content": "say hi"}],
+        tools=[],
+        loader=loop._SilentLoader(),
+        render=False,
+        event_sink=events.append,
+    )
+
+    assert [event["text"] for event in events if event["event"] == "assistantDelta"] == ["hello", " world"]
+
+
+def test_dispatch_tool_uses_emits_live_tool_events(monkeypatch, workspace):
+    class Provider:
+        is_oauth = False
+
+    tool = Tool(
+        name="event_stub",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=lambda args: f"ran {args['x']}",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+    runtime.configure(Provider(), str(workspace), session=None)
+    events: list[dict] = []
+    assistant_msg = {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "call_event", "name": "event_stub", "input": {"x": "now"}},
+        ],
+    }
+    messages = [assistant_msg]
+
+    loop._dispatch_tool_uses(
+        Provider(),
+        assistant_msg,
+        messages,
+        record=False,
+        render=False,
+        event_sink=events.append,
+    )
+
+    assert [event["event"] for event in events] == ["toolStarted", "toolResult"]
+    assert events[0]["callId"] == "call_event"
+    assert events[1]["ok"] is True
+    assert events[1]["text"] == "ran now"
+
+
 def test_anthropic_block_stop_emits_tool_ready_before_full_message():
     content_blocks = []
     usage = {"input_tokens": 10, "output_tokens": 3}
@@ -164,7 +231,7 @@ def test_multi_tool_assistant_message_uses_parallel_dispatch(monkeypatch):
 
     calls: list[list[str]] = []
 
-    def fake_parallel(blocks, *, render):
+    def fake_parallel(blocks, *, render, event_sink=None):
         calls.append([block["id"] for block in blocks])
         return [
             {
