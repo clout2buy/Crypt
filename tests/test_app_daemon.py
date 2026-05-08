@@ -162,6 +162,20 @@ def test_app_daemon_routes_slash_status_to_command_result(monkeypatch, tmp_path)
     assert all(event["event"] != "taskStarted" for event in events)
 
 
+def test_app_daemon_start_prompt_runs_synchronously(monkeypatch, tmp_path):
+    daemon = app_daemon.AppDaemon(emit=lambda event: None, cwd=str(tmp_path))
+    calls: list[tuple[str, str, str | None]] = []
+
+    def fake_run(task_id: str, text: str, route_role: str | None) -> None:
+        calls.append((task_id, text, route_role))
+
+    monkeypatch.setattr(daemon, "_run_prompt_task", fake_run)
+
+    daemon.handle_command({"type": "sendPrompt", "text": "hi", "route": "builder", "id": "sync-1"})
+
+    assert calls == [("sync-1", "hi", "builder")]
+
+
 def test_app_daemon_rejects_empty_prompt(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
     events: list[dict] = []

@@ -25,6 +25,27 @@ Emit = Callable[[dict], None]
 ROUTE_ROLES = ("planner", "builder", "reviewer", "fast", "fallback")
 
 
+def _stdin_lines():
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError):
+        yield from sys.stdin
+        return
+
+    pending = b""
+    while True:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        pending += chunk
+        while b"\n" in pending:
+            line, pending = pending.split(b"\n", 1)
+            yield line.decode("utf-8", errors="replace")
+    if pending:
+        yield pending.decode("utf-8", errors="replace")
+
+
 class AppDaemon:
     def __init__(self, *, emit: Emit | None = None, cwd: str | None = None) -> None:
         self._emit = emit or self._stdout_emit
@@ -36,7 +57,7 @@ class AppDaemon:
 
     def run_forever(self) -> int:
         self.emit("ready", snapshot=self.snapshot())
-        for raw in sys.stdin:
+        for raw in _stdin_lines():
             line = raw.strip()
             if not line:
                 continue
@@ -141,13 +162,7 @@ class AppDaemon:
                 return
             task_id = request_id or uuid.uuid4().hex
             self._active_task = task_id
-        worker = threading.Thread(
-            target=self._run_prompt_task,
-            args=(task_id, text, route_role),
-            daemon=True,
-            name=f"crypt-app-{task_id[:8]}",
-        )
-        worker.start()
+        self._run_prompt_task(task_id, text, route_role)
 
     def _run_prompt_task(self, task_id: str, text: str, route_role: str | None) -> None:
         self.emit("taskStarted", id=task_id, prompt=text, snapshot=self.snapshot())
