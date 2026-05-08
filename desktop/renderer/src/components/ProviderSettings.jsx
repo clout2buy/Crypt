@@ -31,6 +31,7 @@ export function ProviderSettings({ providers, send, snapshot }) {
   const groups = activeProvider?.modelGroups || [];
   const activeGroup = groups.find((group) => group.id === groupId) || groups[0];
   const visibleModels = activeGroup?.models || activeProvider?.models || [];
+  const isOllamaCloud = providerId === "ollama" && groupId === "cloud";
 
   useEffect(() => {
     if (!activeProvider) return;
@@ -42,7 +43,6 @@ export function ProviderSettings({ providers, send, snapshot }) {
     }
   }, [activeProvider?.id, model]);
 
-  const dirty = providerId !== snapshot?.provider || model !== snapshot?.model;
   const authState = snapshot?.authOk ? "Ready" : "Needs auth";
 
   return (
@@ -83,7 +83,7 @@ export function ProviderSettings({ providers, send, snapshot }) {
             <Cpu size={18} />
             <div>
               <h2>{activeProvider?.label || "Select provider"}</h2>
-              <p>{activeProvider?.note || "Only relevant models are shown for this provider."}</p>
+              <p>{isOllamaCloud ? "Cloud models are available through Ollama auth or compatible local Ollama routing." : activeProvider?.note || "Only relevant models are shown for this provider."}</p>
             </div>
           </div>
 
@@ -109,7 +109,7 @@ export function ProviderSettings({ providers, send, snapshot }) {
             ))}
           </div>
 
-          <button className="primary-button wide" type="button" disabled={!dirty} onClick={() => send({ type: "setProviderModel", provider: providerId, model })}>
+          <button className="primary-button wide" type="button" disabled={!providerId || !model} onClick={() => send({ type: "setProviderModel", provider: providerId, model })}>
             <Save size={16} />
             Apply active engine
           </button>

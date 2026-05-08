@@ -35,7 +35,7 @@ function labelFor(payload) {
   if (payload.event === "user") return "You";
   if (payload.event === "taskFinished") return "Crypt";
   if (payload.event === "toolCall") return payload.tool || "Tool call";
-  if (payload.event === "toolResult") return payload.ok === false ? "Tool failed" : "Tool result";
+  if (payload.event === "toolResult") return `${payload.ok === false ? "Failed" : "Complete"} · ${payload.tool || "tool"}`;
   if (payload.event === "commandResult") return payload.command || "Command";
   if (payload.event === "taskProgress") return payload.phase || "Progress";
   return String(payload.event || "System").replace(/([A-Z])/g, " $1").trim();

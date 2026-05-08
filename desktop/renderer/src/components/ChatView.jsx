@@ -25,6 +25,16 @@ const APPROVAL = [
   { id: "all", label: "Bypass" }
 ];
 
+const HIDDEN_CHAT_EVENTS = new Set([
+  "ready",
+  "snapshot",
+  "sessionReset",
+  "taskStarted",
+  "taskProgress",
+  "toolCall",
+  "daemonRestarting"
+]);
+
 export function ChatView({
   activeRoute,
   events,
@@ -40,7 +50,7 @@ export function ChatView({
   transcriptRef
 }) {
   const [prompt, setPrompt] = useState("");
-  const visibleEvents = events.filter((event) => event.event !== "snapshot" && event.event !== "ready");
+  const visibleEvents = events.filter((event) => !HIDDEN_CHAT_EVENTS.has(event.event));
 
   const submit = () => {
     const text = prompt.trim();
@@ -70,12 +80,6 @@ export function ChatView({
 
       <section className="chat-feed" ref={transcriptRef}>
         {visibleEvents.length ? visibleEvents.map((event) => <EventBubble key={event.id} event={event} />) : <EmptyChat onNewSession={onNewSession} />}
-        {running ? (
-          <div className="message-row system">
-            <div className="avatar"><LoaderCircle className="spin" size={16} /></div>
-            <div className="message-card compact">Working through the shared Crypt engine.</div>
-          </div>
-        ) : null}
       </section>
 
       <footer className="composer-bar">
@@ -106,13 +110,13 @@ export function ChatView({
             {running ? <LoaderCircle className="spin" size={18} /> : <SendHorizontal size={18} />}
           </button>
         </div>
+        {running ? <div className="run-status">Running on {activeRoute ? `${activeRoute.provider} / ${activeRoute.model}` : "active model"}...</div> : null}
       </footer>
     </main>
   );
 }
 
 function EventBubble({ event }) {
-  if (event.event === "snapshot" || event.event === "ready") return null;
   const Icon = iconFor(event);
   return (
     <div className={`message-row ${event.tone}`}>
