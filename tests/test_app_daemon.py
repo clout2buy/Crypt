@@ -195,15 +195,46 @@ def test_app_daemon_start_prompt_runs_synchronously(monkeypatch, tmp_path):
     assert calls == [("sync-1", "hi", "builder")]
 
 
-def test_app_daemon_provider_args_follow_thinking_toggle():
-    previous = runtime.show_thinking()
+def test_app_daemon_provider_args_follow_thinking_mode():
+    previous = runtime.thinking_mode()
     try:
-        runtime.set_show_thinking(True)
-        assert app_daemon._args().show_thinking is True
-        runtime.set_show_thinking(False)
-        assert app_daemon._args().show_thinking is False
+        runtime.set_thinking_mode(runtime.THINKING_FAST)
+        fast = app_daemon._args()
+        assert fast.show_thinking is False
+        assert fast.no_thinking is True
+        assert fast.reasoning_effort is None
+        assert fast.thinking_budget == 0
+
+        runtime.set_thinking_mode(runtime.THINKING_THINK)
+        think = app_daemon._args()
+        assert think.show_thinking is True
+        assert think.no_thinking is False
+        assert think.reasoning_effort == "medium"
+        assert think.thinking_budget == 4096
+
+        runtime.set_thinking_mode(runtime.THINKING_ULTRA)
+        ultra = app_daemon._args()
+        assert ultra.show_thinking is True
+        assert ultra.reasoning_effort == "high"
+        assert ultra.thinking_budget == 16384
     finally:
-        runtime.set_show_thinking(previous)
+        runtime.set_thinking_mode(previous)
+
+
+def test_app_daemon_set_thinking_accepts_modes(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
+    previous = runtime.thinking_mode()
+    events: list[dict] = []
+    daemon = app_daemon.AppDaemon(emit=events.append, cwd=str(tmp_path))
+
+    try:
+        daemon.handle_command({"type": "setThinking", "mode": "ultra", "id": "think-1"})
+
+        assert runtime.thinking_mode() == runtime.THINKING_ULTRA
+        assert events[-1]["snapshot"]["thinkingMode"] == "ultra"
+        assert events[-1]["snapshot"]["reasoningEffort"] == "high"
+    finally:
+        runtime.set_thinking_mode(previous)
 
 
 def test_app_daemon_rejects_empty_prompt(monkeypatch, tmp_path):

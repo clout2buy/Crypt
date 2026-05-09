@@ -523,6 +523,7 @@ def _provider(
             model=model_override or args.model or settings.model_default(provider_name, saved),
             max_tokens=args.max_tokens or settings.env_int("OPENAI_MAX_TOKENS", settings.OPENAI_MAX_TOKENS),
             base_url=settings.openai_base_url(saved),
+            reasoning_effort=getattr(args, "reasoning_effort", None),
         )
 
     if provider_name == settings.PROVIDER_OPENAI_CODEX:
@@ -537,6 +538,7 @@ def _provider(
                 settings.OPENAI_CODEX_MAX_TOKENS,
             ),
             base_url=settings.openai_codex_base_url(saved),
+            reasoning_effort=getattr(args, "reasoning_effort", None),
         )
 
     if provider_name == settings.PROVIDER_GEMINI:
@@ -558,6 +560,7 @@ def _provider(
         model=model,
         host=host,
         think=(not args.no_thinking and args.show_thinking),
+        thinking_budget=getattr(args, "thinking_budget", None),
     )
 
 

@@ -88,8 +88,8 @@ class AuthenticationError(Exception):
     pass
 
 
-def _make_provider(events, monkeypatch):
-    provider = OllamaProvider(model="qwen3-coder:480b-cloud", host="http://localhost:11434")
+def _make_provider(events, monkeypatch, **kwargs):
+    provider = OllamaProvider(model="qwen3-coder:480b-cloud", host="http://localhost:11434", **kwargs)
     fake = _FakeClient(events)
     monkeypatch.setattr(provider, "_client", fake)
     return provider, fake
@@ -209,6 +209,12 @@ def test_stream_turn_enables_thinking_when_budget_is_set(monkeypatch):
     provider, fake = _make_provider([{"type": "message_stop"}], monkeypatch)
     list(provider.stream_turn(messages=[], tools=[], system=""))
     assert fake.messages.calls[0]["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+
+
+def test_stream_turn_uses_explicit_thinking_budget(monkeypatch):
+    provider, fake = _make_provider([{"type": "message_stop"}], monkeypatch, thinking_budget=4096)
+    list(provider.stream_turn(messages=[], tools=[], system=""))
+    assert fake.messages.calls[0]["thinking"] == {"type": "enabled", "budget_tokens": 4096}
 
 
 def test_stream_turn_omits_thinking_when_budget_is_zero(monkeypatch):

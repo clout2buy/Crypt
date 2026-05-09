@@ -586,6 +586,18 @@ button:disabled {
   color: var(--text);
 }
 
+.thinking-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding-left: 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--muted);
+}
+
 .segmented-control {
   display: inline-grid;
   grid-template-columns: repeat(2, 1fr);
@@ -605,6 +617,16 @@ button:disabled {
 .segmented-control button.active {
   background: var(--panel-3);
   color: var(--text);
+}
+
+.thinking-mode .segmented-control {
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0 9px 9px 0;
+}
+
+.thinking-mode .segmented-control button {
+  min-width: 58px;
 }
 
 .select-pill {

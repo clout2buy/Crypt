@@ -287,6 +287,19 @@ def test_openai_http_error_includes_status_and_body():
     assert "slow down" in message
 
 
+def test_openai_reasoning_model_uses_reasoning_effort():
+    provider = OpenAIProvider(
+        model="o3-mini",
+        api_key="test-key",
+        reasoning_effort="high",
+    )
+
+    body = provider._build_body(messages=[], tools=[], system="sys")
+
+    assert body["max_completion_tokens"]
+    assert body["reasoning_effort"] == "high"
+
+
 def test_openai_codex_uses_chatgpt_backend_headers_and_responses_body():
     chunks = [
         _sse({"type": "response.output_text.delta", "delta": "hi"}),
@@ -368,6 +381,19 @@ def test_openai_codex_stream_maps_reasoning_and_tool_calls():
         "path": "demo.html",
         "content": "<p>hi</p>",
     }
+
+
+def test_openai_codex_body_uses_reasoning_effort():
+    provider = OpenAICodexProvider(
+        model="gpt-5-codex",
+        auth_token="chatgpt-token",
+        account_id="account-123",
+        reasoning_effort="high",
+    )
+
+    body = provider._build_body(messages=[], tools=[], system="sys")
+
+    assert body["reasoning"] == {"effort": "high", "summary": "auto"}
 
 
 def test_openai_codex_maps_incomplete_and_failed_events():

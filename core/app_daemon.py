@@ -82,7 +82,11 @@ class AppDaemon:
             self.emit("snapshot", id=cid, snapshot=self.snapshot())
             return
         if ctype == "setThinking":
-            runtime.set_show_thinking(bool(command.get("enabled")))
+            mode = str(command.get("mode") or "").strip().lower()
+            if mode:
+                runtime.set_thinking_mode(mode)
+            else:
+                runtime.set_show_thinking(bool(command.get("enabled")))
             self.emit("snapshot", id=cid, snapshot=self.snapshot())
             return
         if ctype == "setWorkspace":
@@ -137,6 +141,8 @@ class AppDaemon:
             "approval": runtime.approval_label(),
             "approvalMode": runtime.approval_mode(),
             "showThinking": runtime.show_thinking(),
+            "thinkingMode": runtime.thinking_mode(),
+            "reasoningEffort": runtime.reasoning_effort() or "none",
             "tools": len(REGISTRY.schemas()),
             "sessionId": getattr(self._session, "id", None),
             "activeTask": self._active_task,
@@ -302,9 +308,13 @@ class AppDaemon:
             self.emit("snapshot", id=request_id, snapshot=self.snapshot())
             return
         if name in {"thinking", "think"}:
-            enabled = not runtime.show_thinking() if not args else args[0].lower() in {"1", "on", "true", "yes"}
-            runtime.set_show_thinking(enabled)
-            self.emit("commandResult", id=request_id, command=name, text=f"Thinking display {'on' if enabled else 'off'}")
+            if args:
+                mode = runtime.set_thinking_mode(args[0])
+            else:
+                mode = runtime.set_thinking_mode(
+                    runtime.THINKING_FAST if runtime.show_thinking() else runtime.THINKING_THINK
+                )
+            self.emit("commandResult", id=request_id, command=name, text=f"Thinking mode set to {mode}")
             self.emit("snapshot", id=request_id, snapshot=self.snapshot())
             return
         if name in {"help", "commands"}:
@@ -322,12 +332,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _args(model: str | None = None) -> SimpleNamespace:
+    thinking_mode = runtime.thinking_mode()
     return SimpleNamespace(
         model=model,
-        max_tokens=None,
-        thinking_budget=None,
-        no_thinking=False,
+        max_tokens=settings.ANTHROPIC_ESCALATED_MAX_TOKENS if thinking_mode == runtime.THINKING_ULTRA else None,
+        thinking_budget=runtime.thinking_budget(),
+        no_thinking=thinking_mode == runtime.THINKING_FAST,
         show_thinking=runtime.show_thinking(),
+        reasoning_effort=runtime.reasoning_effort(),
+        thinking_mode=thinking_mode,
         ollama_host=None,
     )
 
@@ -546,6 +559,7 @@ def _status_text(snapshot: dict) -> str:
         f"engine: {snapshot['provider']} / {snapshot['model']}",
         f"auth: {snapshot['auth']}",
         f"approval: {snapshot['approval']}",
+        f"thinking: {snapshot['thinkingMode']}",
         f"tools: {snapshot['tools']} armed",
     ]
     if snapshot.get("activeTask"):
@@ -565,7 +579,7 @@ def _help_text() -> str:
             "/yolo - auto-approve all tool work",
             "/yolo edits - auto-approve edit tools only",
             "/safe - require manual approval",
-            "/thinking - toggle thinking display",
+            "/thinking [fast|think|ultra] - set provider reasoning mode",
         ]
     )
 

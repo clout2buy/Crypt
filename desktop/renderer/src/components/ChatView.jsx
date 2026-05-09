@@ -31,6 +31,12 @@ const APPROVAL = [
   { id: "all", label: "Bypass" }
 ];
 
+const THINKING = [
+  { id: "fast", label: "Fast" },
+  { id: "think", label: "Think" },
+  { id: "ultra", label: "Ultra" }
+];
+
 const HIDDEN_CHAT_EVENTS = new Set([
   "ready",
   "snapshot",
@@ -97,14 +103,10 @@ export function ChatView({
           <WorkspaceDock workspace={workspace} setWorkspace={setWorkspace} send={send} />
           <Segmented value={lane} options={LANES} onChange={onLaneChange} />
           <ApprovalToggle value={snapshot?.approvalMode || "edits"} onChange={(mode) => send({ type: "setApproval", mode })} />
-          <button
-            className={snapshot?.showThinking ? "text-button active" : "text-button"}
-            type="button"
-            onClick={() => send({ type: "setThinking", enabled: !snapshot?.showThinking })}
-          >
+          <div className="thinking-mode">
             <BrainCircuit size={14} />
-            Thinking
-          </button>
+            <Segmented value={snapshot?.thinkingMode || "fast"} options={THINKING} onChange={(mode) => send({ type: "setThinking", mode })} />
+          </div>
           <button className="text-button" type="button" onClick={onClearView}>
             <Eraser size={14} />
             Clear view

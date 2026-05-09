@@ -119,7 +119,7 @@ def run_prompt(
     UI, but approvals are governed by ``approval_mode`` instead of prompts.
     """
     previous_mode = runtime.approval_mode()
-    previous_thinking = runtime.show_thinking()
+    previous_thinking_mode = runtime.thinking_mode()
     evidence.clear()
     messages: list[dict] = session_obj.load_messages() if session_obj else []
 
@@ -135,7 +135,8 @@ def run_prompt(
         run_subagent,
         session=session_obj,
     )
-    runtime.set_show_thinking(show_thinking)
+    if show_thinking != runtime.show_thinking():
+        runtime.set_show_thinking(show_thinking)
     runtime.set_approval_mode(approval_mode)
     REGISTRY.before_prompt()
     user_msg = {"role": "user", "content": user_text}
@@ -173,7 +174,7 @@ def run_prompt(
         raise
     finally:
         runtime.set_approval_mode(previous_mode)
-        runtime.set_show_thinking(previous_thinking)
+        runtime.set_thinking_mode(previous_thinking_mode)
 
 
 def run(

@@ -494,6 +494,7 @@ class OpenAIProvider:
         max_tokens: int = OPENAI_MAX_TOKENS,
         api_key: str | None = None,
         base_url: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         key = api_key or os.getenv("OPENAI_API_KEY")
         if not key:
@@ -503,6 +504,7 @@ class OpenAIProvider:
         self._api_key = key
         self.model = model
         self._max_tokens = max_tokens
+        self._reasoning_effort = reasoning_effort
         self._base_url = (base_url or os.getenv("OPENAI_BASE_URL") or OPENAI_BASE_URL).rstrip("/")
         self._http = httpx.Client(timeout=httpx.Timeout(10.0, read=180.0))
         atexit.register(self.close)
@@ -620,6 +622,8 @@ class OpenAIProvider:
         # Sending the wrong one is a 400 on either side.
         if self._is_reasoning_model():
             body["max_completion_tokens"] = self._max_tokens
+            if self._reasoning_effort:
+                body["reasoning_effort"] = self._reasoning_effort
         else:
             body["max_tokens"] = self._max_tokens
         if tools:
@@ -652,6 +656,7 @@ class OpenAICodexProvider:
         account_id: str | None = None,
         max_tokens: int = OPENAI_CODEX_MAX_TOKENS,
         base_url: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         if not auth_token:
             raise RuntimeError("OpenAICodexProvider needs ChatGPT OAuth auth_token.")
@@ -661,6 +666,7 @@ class OpenAICodexProvider:
         self._account_id = account_id
         self.model = model
         self._max_tokens = max_tokens
+        self._reasoning_effort = reasoning_effort
         self._base_url = (base_url or os.getenv("OPENAI_CODEX_BASE_URL") or OPENAI_CODEX_BASE_URL).rstrip("/")
         self._http = httpx.Client(timeout=httpx.Timeout(10.0, read=300.0))
         atexit.register(self.close)
@@ -834,7 +840,7 @@ class OpenAICodexProvider:
             "tool_choice": "auto",
             "parallel_tool_calls": True,
         }
-        effort = os.getenv("OPENAI_CODEX_REASONING_EFFORT")
+        effort = self._reasoning_effort or os.getenv("OPENAI_CODEX_REASONING_EFFORT")
         if effort:
             body["reasoning"] = {
                 "effort": effort,
@@ -1382,6 +1388,7 @@ class OllamaProvider:
         model: str = OLLAMA_MODEL,
         host: str | None = None,
         think: bool = True,  # kept for signature compat with /model switcher
+        thinking_budget: int | None = None,
     ) -> None:
         from anthropic import Anthropic
 
@@ -1402,10 +1409,13 @@ class OllamaProvider:
         # Thinking-capable models (Qwen3, Kimi K2, GLM, DeepSeek) emit a
         # `thinking` content block when this is configured. Set to 0 in
         # the env to disable for non-thinking models.
-        try:
-            self._thinking_budget = int(os.getenv("OLLAMA_THINKING_BUDGET", "0"))
-        except ValueError:
-            self._thinking_budget = 0
+        if thinking_budget is None:
+            try:
+                self._thinking_budget = int(os.getenv("OLLAMA_THINKING_BUDGET", "0"))
+            except ValueError:
+                self._thinking_budget = 0
+        else:
+            self._thinking_budget = max(0, int(thinking_budget))
         # Anthropic's API rejects budget >= max_tokens; leave room for the
         # actual response.
         if self._thinking_budget >= self._max_tokens:

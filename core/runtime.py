@@ -17,7 +17,7 @@ _cwd = "."
 _subagent_runner: Callable[..., str] | None = None
 _session = None
 _approval_mode = os.getenv("CRYPT_APPROVAL", "edits").strip().lower()
-_show_thinking = False
+_thinking_mode = os.getenv("CRYPT_THINKING_MODE", "fast").strip().lower()
 _render_tools = contextvars.ContextVar("crypt_render_tools", default=True)
 _cwd_context = contextvars.ContextVar("crypt_cwd", default=None)
 _subagent_tools = contextvars.ContextVar("crypt_subagent_tools", default=None)
@@ -32,6 +32,12 @@ APPROVAL_ALL = "all"
 APPROVAL_MODES = (APPROVAL_NORMAL, APPROVAL_EDITS, APPROVAL_ALL)
 if _approval_mode not in APPROVAL_MODES:
     _approval_mode = APPROVAL_EDITS
+THINKING_FAST = "fast"
+THINKING_THINK = "think"
+THINKING_ULTRA = "ultra"
+THINKING_MODES = (THINKING_FAST, THINKING_THINK, THINKING_ULTRA)
+if _thinking_mode not in THINKING_MODES:
+    _thinking_mode = THINKING_FAST
 AUTO_EDIT_TOOLS = {
     "edit_file",
     "multi_edit",
@@ -151,13 +157,51 @@ def can_auto_approve_plan() -> bool:
 
 
 def show_thinking() -> bool:
-    return _show_thinking
+    return _thinking_mode != THINKING_FAST
 
 
 def set_show_thinking(on: bool) -> bool:
-    global _show_thinking
-    _show_thinking = on
-    return _show_thinking
+    set_thinking_mode(THINKING_THINK if on else THINKING_FAST)
+    return show_thinking()
+
+
+def thinking_mode() -> str:
+    return _thinking_mode
+
+
+def set_thinking_mode(mode: str) -> str:
+    global _thinking_mode
+    normalized = (mode or THINKING_FAST).strip().lower()
+    aliases = {
+        "off": THINKING_FAST,
+        "none": THINKING_FAST,
+        "on": THINKING_THINK,
+        "thinking": THINKING_THINK,
+        "high": THINKING_ULTRA,
+        "xhigh": THINKING_ULTRA,
+        "extra": THINKING_ULTRA,
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in THINKING_MODES:
+        raise ValueError(f"unknown thinking mode: {mode}")
+    _thinking_mode = normalized
+    return _thinking_mode
+
+
+def reasoning_effort() -> str | None:
+    if _thinking_mode == THINKING_THINK:
+        return "medium"
+    if _thinking_mode == THINKING_ULTRA:
+        return "high"
+    return None
+
+
+def thinking_budget() -> int:
+    if _thinking_mode == THINKING_THINK:
+        return 4_096
+    if _thinking_mode == THINKING_ULTRA:
+        return 16_384
+    return 0
 
 
 def render_tools() -> bool:
