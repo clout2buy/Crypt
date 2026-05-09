@@ -13,6 +13,12 @@ contextBridge.exposeInMainWorld("crypt", {
   chooseDirectory() {
     return ipcRenderer.invoke("crypt:chooseDirectory");
   },
+  choosePreviewFile() {
+    return ipcRenderer.invoke("crypt:choosePreviewFile");
+  },
+  captureScreenshot() {
+    return ipcRenderer.invoke("crypt:captureScreenshot");
+  },
   onEvent(callback) {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("crypt:event", listener);

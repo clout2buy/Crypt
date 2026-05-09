@@ -40,6 +40,12 @@ The Electron app is a desktop shell over the same Python backend as the CLI/TUI.
 Provider auth, tools, workspace state, task routing, thinking modes, and
 subagents all flow through `python -m crypt app-daemon`.
 
+Desktop tabs:
+
+- `Chat` keeps the main conversation quiet and fast.
+- `Agents` shows active runs, model routes, tool calls, thinking, and subagent lanes.
+- `Code` pairs the chat stream with a preview browser for localhost apps or HTML files, plus window screenshots.
+
 ```bash
 python -m pip install -e ".[dev]"
 npm --prefix desktop ci

@@ -1,8 +1,22 @@
-import { Bot, Cloud, MessageSquare, Plus, Settings2, Shield, Wrench } from "lucide-react";
+import {
+  Bot,
+  Cloud,
+  Code2,
+  GitBranch,
+  MessageSquare,
+  Plus,
+  Settings2,
+  Shield,
+  Wrench
+} from "lucide-react";
 
-export function Sidebar({ activeView, connected, onChangeView, onNewSession, snapshot }) {
-  const nav = [
+export function Sidebar({ activeView, connected, onChangeView, onNewSession, recentPrompts = [], snapshot }) {
+  const modes = [
     { id: "chat", label: "Chat", icon: MessageSquare },
+    { id: "agents", label: "Agents", icon: GitBranch },
+    { id: "code", label: "Code", icon: Code2 }
+  ];
+  const nav = [
     { id: "providers", label: "Providers", icon: Cloud }
   ];
 
@@ -14,6 +28,20 @@ export function Sidebar({ activeView, connected, onChangeView, onNewSession, sna
           <strong>Crypt</strong>
           <span>{connected ? "Linked" : "Offline"}</span>
         </div>
+      </div>
+
+      <div className="mode-tabs">
+        {modes.map((item) => (
+          <button
+            key={item.id}
+            className={activeView === item.id ? "active" : ""}
+            type="button"
+            onClick={() => onChangeView(item.id)}
+          >
+            <item.icon size={15} />
+            {item.label}
+          </button>
+        ))}
       </div>
 
       <button className="new-session" type="button" onClick={onNewSession}>
@@ -41,6 +69,19 @@ export function Sidebar({ activeView, connected, onChangeView, onNewSession, sna
         <InfoLine icon={Settings2} label="Provider" value={snapshot?.provider || "Pending"} />
         <InfoLine icon={Shield} label="Permissions" value={snapshot?.approval || "Manual"} />
         <InfoLine icon={Wrench} label="Tools" value={`${snapshot?.tools ?? 0} armed`} />
+      </div>
+
+      <div className="sidebar-section recents">
+        <span className="section-label">This Session</span>
+        {recentPrompts.length ? (
+          recentPrompts.map((event) => (
+            <div className="recent-item" key={event.id} title={event.text}>
+              {event.text}
+            </div>
+          ))
+        ) : (
+          <span className="empty-sidebar">No prompts yet</span>
+        )}
       </div>
 
       <div className="sidebar-footer">

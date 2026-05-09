@@ -209,6 +209,26 @@ async function chooseDirectory() {
   return result.filePaths[0];
 }
 
+async function choosePreviewFile() {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select HTML preview",
+    properties: ["openFile"],
+    filters: [
+      { name: "Web files", extensions: ["html", "htm", "svg"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+}
+
+async function captureScreenshot() {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const image = await mainWindow.webContents.capturePage();
+  return image.toDataURL();
+}
+
 app.whenReady().then(() => {
   createWindow();
   startDaemon();
@@ -217,6 +237,8 @@ app.whenReady().then(() => {
   ipcMain.handle("crypt:openExternal", (_event, url) => shell.openExternal(url));
   ipcMain.handle("crypt:restartDaemon", () => restartDaemon());
   ipcMain.handle("crypt:chooseDirectory", () => chooseDirectory());
+  ipcMain.handle("crypt:choosePreviewFile", () => choosePreviewFile());
+  ipcMain.handle("crypt:captureScreenshot", () => captureScreenshot());
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

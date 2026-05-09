@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatView } from "./components/ChatView.jsx";
+import { CodeView } from "./components/CodeView.jsx";
+import { AgentsView } from "./components/AgentsView.jsx";
 import { ProviderSettings } from "./components/ProviderSettings.jsx";
 import { Sidebar } from "./components/Sidebar.jsx";
 import { normalizeEvent, pushEvent } from "./lib/events.js";
@@ -47,6 +49,14 @@ export function App() {
     () => (snapshot?.routes || []).find((route) => route.role === lane),
     [lane, snapshot?.routes]
   );
+  const recentPrompts = useMemo(
+    () =>
+      events
+        .filter((event) => event.event === "user" && event.text)
+        .slice(-8)
+        .reverse(),
+    [events]
+  );
 
   const startNewSession = () => {
     setEvents([]);
@@ -60,11 +70,40 @@ export function App() {
         connected={connected}
         onChangeView={setActiveView}
         onNewSession={startNewSession}
+        recentPrompts={recentPrompts}
         snapshot={snapshot}
       />
 
       {activeView === "providers" ? (
         <ProviderSettings providers={providers} send={send} snapshot={snapshot} />
+      ) : activeView === "agents" ? (
+        <AgentsView
+          activeRoute={activeRoute}
+          events={events}
+          lane={lane}
+          onClearView={() => setEvents([])}
+          onLaneChange={setLane}
+          onRestart={() => window.crypt?.restart?.()}
+          onUserMessage={(text) => pushEvent(setEvents, { event: "user", text })}
+          running={running}
+          send={send}
+          snapshot={snapshot}
+          transcriptRef={transcriptRef}
+        />
+      ) : activeView === "code" ? (
+        <CodeView
+          activeRoute={activeRoute}
+          events={events}
+          lane={lane}
+          onClearView={() => setEvents([])}
+          onLaneChange={setLane}
+          onRestart={() => window.crypt?.restart?.()}
+          onUserMessage={(text) => pushEvent(setEvents, { event: "user", text })}
+          running={running}
+          send={send}
+          snapshot={snapshot}
+          transcriptRef={transcriptRef}
+        />
       ) : (
         <ChatView
           activeRoute={activeRoute}
