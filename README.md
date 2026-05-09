@@ -34,6 +34,29 @@ Fresh clones default to local Ollama in the current directory. Start Ollama with
 `ollama serve`, or run `python -m crypt setup` to save another provider, model,
 or workspace.
 
+## Desktop App
+
+The Electron app is a desktop shell over the same Python backend as the CLI/TUI.
+Provider auth, tools, workspace state, task routing, thinking modes, and
+subagents all flow through `python -m crypt app-daemon`.
+
+```bash
+python -m pip install -e ".[dev]"
+npm --prefix desktop ci
+npm --prefix desktop run electron:preview
+```
+
+For live renderer development, use:
+
+```bash
+npm --prefix desktop run electron:dev
+```
+
+Use `electron:preview` when testing release behavior because it builds
+`desktop/renderer/dist` first, then launches Electron from the static assets.
+If the backend does not start, run `python -m crypt doctor` and confirm the
+same provider works in `python -m crypt`.
+
 ## ⚡ Daily Commands
 
 | Command | Purpose |
@@ -61,6 +84,7 @@ tools/               model-visible tools, one module per tool
 benchmarks/          packaged benchmark suites
 tests/               focused regression and production-runtime coverage
 docs/                architecture and operating reference
+desktop/             Electron desktop shell and React renderer
 ```
 
 ## 🛡️ Production Guardrails
