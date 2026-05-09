@@ -19,6 +19,26 @@ contextBridge.exposeInMainWorld("crypt", {
   captureScreenshot() {
     return ipcRenderer.invoke("crypt:captureScreenshot");
   },
+  detectPreviewServer(cwd) {
+    return ipcRenderer.invoke("crypt:detectPreviewServer", cwd);
+  },
+  startPreviewServer(cwd) {
+    return ipcRenderer.invoke("crypt:startPreviewServer", cwd);
+  },
+  stopPreviewServer() {
+    return ipcRenderer.invoke("crypt:stopPreviewServer");
+  },
+  installPreviewDeps(cwd) {
+    return ipcRenderer.invoke("crypt:installPreviewDeps", cwd);
+  },
+  listPreviewArtifacts(cwd) {
+    return ipcRenderer.invoke("crypt:listPreviewArtifacts", cwd);
+  },
+  onPreviewEvent(callback) {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("crypt:preview", listener);
+    return () => ipcRenderer.removeListener("crypt:preview", listener);
+  },
   onEvent(callback) {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("crypt:event", listener);

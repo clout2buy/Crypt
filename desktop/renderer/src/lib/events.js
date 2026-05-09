@@ -42,7 +42,8 @@ function mergeEvent(current, next) {
     ...prev,
     ...next,
     text,
-    time: next.time || prev.time
+    time: next.time || prev.time,
+    args: next.args || prev.args || null
   };
   return updated;
 }

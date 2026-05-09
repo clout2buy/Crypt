@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -7,28 +7,95 @@ import {
   FileCode2,
   Globe2,
   Monitor,
-  RefreshCcw
+  PackageCheck,
+  Play,
+  RefreshCcw,
+  Server,
+  Square
 } from "lucide-react";
+import { previewArtifactsFromEvents } from "../lib/artifacts.js";
 
-export function PreviewPanel() {
-  const [draftUrl, setDraftUrl] = useState("http://localhost:5173");
+export function PreviewPanel({ artifacts: providedArtifacts, autoStart = false, events = [], workspace = "" }) {
+  const detectedArtifacts = useMemo(() => previewArtifactsFromEvents(events, workspace), [events, workspace]);
+  const artifacts = providedArtifacts || detectedArtifacts;
+  const latestArtifact = artifacts[0] || null;
+  const [draftUrl, setDraftUrl] = useState("");
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [iframeKey, setIframeKey] = useState(0);
   const [screenshot, setScreenshot] = useState("");
-  const currentUrl = historyIndex >= 0 ? history[historyIndex] : "";
+  const [autoLoadedId, setAutoLoadedId] = useState("");
+  const [autoStartedCwd, setAutoStartedCwd] = useState("");
+  const [serverState, setServerState] = useState(null);
+  const currentUrl = historyIndex >= 0 ? history[historyIndex]?.url || "" : "";
+  const currentLabel = historyIndex >= 0 ? history[historyIndex]?.label || "" : "";
   const canGoBack = historyIndex > 0;
   const canGoForward = historyIndex >= 0 && historyIndex < history.length - 1;
   const displayUrl = useMemo(() => currentUrl.replace(/^file:\/\/\//, ""), [currentUrl]);
 
+  useEffect(() => {
+    if (!latestArtifact || latestArtifact.id === autoLoadedId) return;
+    navigateToTarget(latestArtifact, { auto: true });
+  }, [latestArtifact?.id]);
+
+  useEffect(() => {
+    let alive = true;
+    window.crypt?.detectPreviewServer?.(workspace).then((state) => {
+      if (alive) setServerState(state);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [workspace]);
+
+  useEffect(() => {
+    return window.crypt?.onPreviewEvent?.((payload) => {
+      if (payload?.event === "previewState") setServerState(payload.state);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!autoStart || !serverState?.available || serverState.running || serverState.installing) return;
+    if (serverState.needsInstall || autoStartedCwd === serverState.cwd) return;
+    setAutoStartedCwd(serverState.cwd);
+    window.crypt?.startPreviewServer?.(serverState.cwd);
+  }, [
+    autoStart,
+    autoStartedCwd,
+    serverState?.available,
+    serverState?.cwd,
+    serverState?.installing,
+    serverState?.needsInstall,
+    serverState?.running
+  ]);
+
+  useEffect(() => {
+    if (!serverState?.url || serverState.url === currentUrl) return;
+    navigateToTarget({
+      id: `server-${serverState.url}`,
+      label: serverState.url.replace(/^https?:\/\//, ""),
+      path: serverState.url,
+      url: serverState.url
+    });
+  }, [serverState?.url]);
+
   const navigate = (raw = draftUrl) => {
-    const next = normalizePreviewUrl(raw);
+    const next = normalizePreviewTarget(raw);
     if (!next) return;
+    navigateToTarget(next);
+  };
+
+  const navigateToTarget = (target, { auto = false } = {}) => {
+    const next = typeof target === "string" ? normalizePreviewTarget(target) : target;
+    if (!next?.url) return;
+    if (auto) setAutoLoadedId(next.id || next.url);
     const nextHistory = history.slice(0, historyIndex + 1);
-    nextHistory.push(next);
+    if (nextHistory[nextHistory.length - 1]?.url !== next.url) {
+      nextHistory.push(next);
+    }
     setHistory(nextHistory);
     setHistoryIndex(nextHistory.length - 1);
-    setDraftUrl(next);
+    setDraftUrl(next.url);
     setIframeKey((value) => value + 1);
   };
 
@@ -43,16 +110,41 @@ export function PreviewPanel() {
   };
 
   return (
-    <aside className="preview-panel">
+    <aside className={currentUrl ? "preview-panel active-preview" : "preview-panel"}>
       <header className="preview-header">
         <div>
           <span><Monitor size={15} /> Preview</span>
-          <strong>{displayUrl || "No target loaded"}</strong>
+          <strong>{currentLabel || displayUrl || "Waiting for a web artifact"}</strong>
         </div>
         <button className="icon-button" type="button" title="Open externally" disabled={!currentUrl} onClick={() => window.crypt?.openExternal?.(currentUrl)}>
           <ExternalLink size={15} />
         </button>
       </header>
+
+      {artifacts.length ? (
+        <div className="artifact-strip">
+          {artifacts.slice(0, 4).map((artifact) => (
+            <button
+              key={artifact.id}
+              className={artifact.url === currentUrl ? "artifact-chip active" : "artifact-chip"}
+              type="button"
+              onClick={() => navigateToTarget(artifact)}
+              title={artifact.path}
+            >
+              <FileCode2 size={14} />
+              <span>{artifact.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <ServerConsole
+        serverState={serverState}
+        workspace={workspace}
+        onInstall={() => window.crypt?.installPreviewDeps?.(workspace)}
+        onStart={() => window.crypt?.startPreviewServer?.(workspace)}
+        onStop={() => window.crypt?.stopPreviewServer?.()}
+      />
 
       <div className="preview-controls">
         <button className="icon-button" type="button" disabled={!canGoBack} title="Back" onClick={() => {
@@ -78,6 +170,7 @@ export function PreviewPanel() {
             onKeyDown={(event) => {
               if (event.key === "Enter") navigate();
             }}
+            placeholder={latestArtifact ? "Preview target" : "localhost:3000 or generated HTML"}
             spellCheck={false}
           />
         </label>
@@ -97,7 +190,8 @@ export function PreviewPanel() {
         ) : (
           <div className="preview-empty">
             <Monitor size={28} />
-            <strong>Open a localhost app or HTML file.</strong>
+            <strong>No preview yet.</strong>
+            <span>Generated HTML/SVG files and launched localhost apps open here automatically.</span>
           </div>
         )}
       </div>
@@ -110,6 +204,71 @@ export function PreviewPanel() {
       ) : null}
     </aside>
   );
+}
+
+function ServerConsole({ onInstall, onStart, onStop, serverState, workspace }) {
+  if (!serverState?.available) {
+    return (
+      <div className="server-console quiet">
+        <div className="server-status">
+          <Server size={15} />
+          <span>{workspace ? "No launchable app server detected" : "Workspace not ready"}</span>
+        </div>
+      </div>
+    );
+  }
+
+  const logs = (serverState.logs || []).slice(-8).join("\n");
+  const status = serverState.installing
+    ? "Installing dependencies"
+    : serverState.running
+      ? serverState.url || "Starting localhost"
+      : serverState.needsInstall
+        ? "Dependencies needed"
+        : "Ready to launch";
+
+  return (
+    <div className={serverState.running ? "server-console running" : "server-console"}>
+      <div className="server-status">
+        <Server size={15} />
+        <div>
+          <strong>{status}</strong>
+          <span>{serverState.command} · {serverState.packageName}</span>
+        </div>
+      </div>
+      <div className="server-actions">
+        {serverState.needsInstall ? (
+          <button className="secondary-button" type="button" disabled={serverState.installing} onClick={onInstall}>
+            <PackageCheck size={14} />
+            Install deps
+          </button>
+        ) : null}
+        {serverState.running ? (
+          <button className="secondary-button" type="button" onClick={onStop}>
+            <Square size={14} />
+            Stop
+          </button>
+        ) : (
+          <button className="secondary-button" type="button" disabled={serverState.installing} onClick={onStart}>
+            <Play size={14} />
+            Start
+          </button>
+        )}
+      </div>
+      {logs ? <pre className="server-log">{logs}</pre> : null}
+    </div>
+  );
+}
+
+function normalizePreviewTarget(raw) {
+  const url = normalizePreviewUrl(raw);
+  if (!url) return null;
+  return {
+    id: url,
+    label: labelFromUrl(url),
+    path: url,
+    url
+  };
 }
 
 function normalizePreviewUrl(raw) {
@@ -128,4 +287,17 @@ function normalizePreviewUrl(raw) {
     return `http://${value}`;
   }
   return `https://${value}`;
+}
+
+function labelFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "file:") {
+      const parts = decodeURIComponent(parsed.pathname).split("/");
+      return parts[parts.length - 1] || "artifact";
+    }
+    return parsed.host;
+  } catch {
+    return url;
+  }
 }

@@ -1,7 +1,10 @@
+import { useEffect, useMemo, useState } from "react";
+import { Monitor } from "lucide-react";
 import { Composer } from "./Composer.jsx";
 import { TopBar } from "./ChatView.jsx";
 import { EventStream } from "./EventStream.jsx";
 import { PreviewPanel } from "./PreviewPanel.jsx";
+import { hasWebProjectActivity, previewArtifactsFromEvents } from "../lib/artifacts.js";
 
 export function CodeView({
   activeRoute,
@@ -16,6 +19,24 @@ export function CodeView({
   snapshot,
   transcriptRef
 }) {
+  const workspace = snapshot?.workspace || "";
+  const [workspaceArtifacts, setWorkspaceArtifacts] = useState([]);
+  const eventArtifacts = useMemo(() => previewArtifactsFromEvents(events, workspace), [events, workspace]);
+  const artifacts = useMemo(() => mergeArtifacts(eventArtifacts, workspaceArtifacts), [eventArtifacts, workspaceArtifacts]);
+  const launchSignal = useMemo(() => hasWebProjectActivity(events), [events]);
+  const [previewPinned, setPreviewPinned] = useState(false);
+  const showPreview = previewPinned || artifacts.length > 0 || launchSignal;
+
+  useEffect(() => {
+    let alive = true;
+    window.crypt?.listPreviewArtifacts?.(workspace).then((items) => {
+      if (alive) setWorkspaceArtifacts(Array.isArray(items) ? items : []);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [workspace, events.length]);
+
   return (
     <main className="workspace-shell code-shell">
       <TopBar
@@ -25,8 +46,14 @@ export function CodeView({
         title="Code"
       />
 
-      <section className="code-workbench">
+      <section className={showPreview ? "code-workbench has-preview" : "code-workbench"}>
         <div className="code-chat">
+          {!showPreview ? (
+            <button className="preview-peek" type="button" onClick={() => setPreviewPinned(true)}>
+              <Monitor size={16} />
+              Open preview when you need one
+            </button>
+          ) : null}
           <EventStream
             compact
             empty={<div className="empty-ops">Start a code task and Crypt will stream edits, tools, and output here.</div>}
@@ -45,8 +72,27 @@ export function CodeView({
             snapshot={snapshot}
           />
         </div>
-        <PreviewPanel />
+        {showPreview ? (
+          <PreviewPanel
+            artifacts={artifacts}
+            autoStart={launchSignal || previewPinned}
+            events={events}
+            workspace={workspace}
+          />
+        ) : null}
       </section>
     </main>
   );
+}
+
+function mergeArtifacts(primary, secondary) {
+  const seen = new Set();
+  const merged = [];
+  for (const item of [...primary, ...secondary]) {
+    const key = String(item.path || item.url || item.id).toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged;
 }

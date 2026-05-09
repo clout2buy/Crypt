@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { createPreviewManager } = require("./preview.cjs");
 
 const isDev = !app.isPackaged;
 const forceBuilt = process.env.CRYPT_ELECTRON_BUILT === "1";
@@ -12,6 +13,7 @@ const projectRoot = path.resolve(desktopRoot, "..");
 let mainWindow = null;
 let daemon = null;
 let daemonBuffer = "";
+let previewManager = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -161,6 +163,12 @@ function forwardEvent(event) {
   }
 }
 
+function forwardPreviewEvent(event) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("crypt:preview", event);
+  }
+}
+
 function sendCommand(command) {
   const body = {
     id: command.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -232,6 +240,7 @@ async function captureScreenshot() {
 app.whenReady().then(() => {
   createWindow();
   startDaemon();
+  previewManager = createPreviewManager({ backendCwd, emit: forwardPreviewEvent });
 
   ipcMain.handle("crypt:command", (_event, command) => sendCommand(command || {}));
   ipcMain.handle("crypt:openExternal", (_event, url) => shell.openExternal(url));
@@ -239,6 +248,11 @@ app.whenReady().then(() => {
   ipcMain.handle("crypt:chooseDirectory", () => chooseDirectory());
   ipcMain.handle("crypt:choosePreviewFile", () => choosePreviewFile());
   ipcMain.handle("crypt:captureScreenshot", () => captureScreenshot());
+  ipcMain.handle("crypt:detectPreviewServer", (_event, cwd) => previewManager.detect(cwd));
+  ipcMain.handle("crypt:startPreviewServer", (_event, cwd) => previewManager.start(cwd));
+  ipcMain.handle("crypt:stopPreviewServer", () => previewManager.stop());
+  ipcMain.handle("crypt:installPreviewDeps", (_event, cwd) => previewManager.install(cwd));
+  ipcMain.handle("crypt:listPreviewArtifacts", (_event, cwd) => previewManager.artifacts(cwd));
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -254,6 +268,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  previewManager?.dispose();
   if (daemon) {
     stopDaemon();
   }
