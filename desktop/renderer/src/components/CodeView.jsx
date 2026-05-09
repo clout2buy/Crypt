@@ -21,11 +21,18 @@ export function CodeView({
 }) {
   const workspace = snapshot?.workspace || "";
   const [workspaceArtifacts, setWorkspaceArtifacts] = useState([]);
+  const [dismissedArtifactIds, setDismissedArtifactIds] = useState([]);
   const eventArtifacts = useMemo(() => previewArtifactsFromEvents(events, workspace), [events, workspace]);
-  const artifacts = useMemo(() => mergeArtifacts(eventArtifacts, workspaceArtifacts), [eventArtifacts, workspaceArtifacts]);
+  const artifacts = useMemo(
+    () => mergeArtifacts(eventArtifacts, workspaceArtifacts).filter((item) => !dismissedArtifactIds.includes(item.id)),
+    [dismissedArtifactIds, eventArtifacts, workspaceArtifacts]
+  );
   const launchSignal = useMemo(() => hasWebProjectActivity(events), [events]);
   const [previewPinned, setPreviewPinned] = useState(false);
-  const showPreview = previewPinned || artifacts.length > 0 || launchSignal;
+  const [closedPreviewKey, setClosedPreviewKey] = useState("");
+  const previewKey = `${artifacts.map((item) => item.id).join("|")}::${launchSignal ? "launch" : ""}`;
+  const previewWanted = previewPinned || artifacts.length > 0 || launchSignal;
+  const showPreview = previewWanted && previewKey !== closedPreviewKey;
 
   useEffect(() => {
     let alive = true;
@@ -49,7 +56,14 @@ export function CodeView({
       <section className={showPreview ? "code-workbench has-preview" : "code-workbench"}>
         <div className="code-chat">
           {!showPreview ? (
-            <button className="preview-peek" type="button" onClick={() => setPreviewPinned(true)}>
+            <button
+              className="preview-peek"
+              type="button"
+              onClick={() => {
+                setClosedPreviewKey("");
+                setPreviewPinned(true);
+              }}
+            >
               <Monitor size={16} />
               Open preview when you need one
             </button>
@@ -77,6 +91,13 @@ export function CodeView({
             artifacts={artifacts}
             autoStart={launchSignal || previewPinned}
             events={events}
+            onClose={() => {
+              setPreviewPinned(false);
+              setClosedPreviewKey(previewKey);
+            }}
+            onDismissArtifact={(artifactId) => {
+              setDismissedArtifactIds((ids) => (ids.includes(artifactId) ? ids : [...ids, artifactId]));
+            }}
             workspace={workspace}
           />
         ) : null}

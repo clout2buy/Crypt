@@ -11,11 +11,19 @@ import {
   Play,
   RefreshCcw,
   Server,
-  Square
+  Square,
+  X
 } from "lucide-react";
 import { previewArtifactsFromEvents } from "../lib/artifacts.js";
 
-export function PreviewPanel({ artifacts: providedArtifacts, autoStart = false, events = [], workspace = "" }) {
+export function PreviewPanel({
+  artifacts: providedArtifacts,
+  autoStart = false,
+  events = [],
+  onClose,
+  onDismissArtifact,
+  workspace = ""
+}) {
   const detectedArtifacts = useMemo(() => previewArtifactsFromEvents(events, workspace), [events, workspace]);
   const artifacts = providedArtifacts || detectedArtifacts;
   const latestArtifact = artifacts[0] || null;
@@ -116,24 +124,32 @@ export function PreviewPanel({ artifacts: providedArtifacts, autoStart = false, 
           <span><Monitor size={15} /> Preview</span>
           <strong>{currentLabel || displayUrl || "Waiting for a web artifact"}</strong>
         </div>
-        <button className="icon-button" type="button" title="Open externally" disabled={!currentUrl} onClick={() => window.crypt?.openExternal?.(currentUrl)}>
-          <ExternalLink size={15} />
-        </button>
+        <div className="preview-header-actions">
+          <button className="icon-button" type="button" title="Open externally" disabled={!currentUrl} onClick={() => window.crypt?.openExternal?.(currentUrl)}>
+            <ExternalLink size={15} />
+          </button>
+          <button className="icon-button" type="button" title="Close preview" onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
       </header>
 
       {artifacts.length ? (
         <div className="artifact-strip">
           {artifacts.slice(0, 4).map((artifact) => (
-            <button
+            <div
               key={artifact.id}
               className={artifact.url === currentUrl ? "artifact-chip active" : "artifact-chip"}
-              type="button"
-              onClick={() => navigateToTarget(artifact)}
               title={artifact.path}
             >
-              <FileCode2 size={14} />
-              <span>{artifact.label}</span>
-            </button>
+              <button className="artifact-chip-main" type="button" onClick={() => navigateToTarget(artifact)}>
+                <FileCode2 size={14} />
+                <span>{artifact.label}</span>
+              </button>
+              <button className="artifact-dismiss" type="button" title={`Dismiss ${artifact.label}`} onClick={() => onDismissArtifact?.(artifact.id)}>
+                <X size={12} />
+              </button>
+            </div>
           ))}
         </div>
       ) : null}
@@ -233,7 +249,7 @@ function ServerConsole({ onInstall, onStart, onStop, serverState, workspace }) {
         <Server size={15} />
         <div>
           <strong>{status}</strong>
-          <span>{serverState.command} · {serverState.packageName}</span>
+          <span>{serverState.command} / {serverState.packageName}</span>
         </div>
       </div>
       <div className="server-actions">

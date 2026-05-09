@@ -1005,6 +1005,12 @@ button:disabled {
   font-weight: 750;
 }
 
+.preview-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .preview-header strong {
   display: block;
   max-width: 620px;
@@ -1024,10 +1030,9 @@ button:disabled {
 .artifact-chip {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
   max-width: 180px;
   min-height: 32px;
-  padding: 0 10px;
+  padding: 0 4px 0 8px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--panel);
@@ -1035,10 +1040,39 @@ button:disabled {
   font-weight: 650;
 }
 
-.artifact-chip span {
+.artifact-chip-main,
+.artifact-dismiss {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.artifact-chip-main {
+  gap: 7px;
+  min-width: 0;
+  padding: 0;
+  font-weight: 650;
+}
+
+.artifact-chip-main span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.artifact-dismiss {
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 4px;
+  border-radius: 99px;
+}
+
+.artifact-dismiss:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
 }
 
 .artifact-chip.active,
