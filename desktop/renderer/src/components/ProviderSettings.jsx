@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Cloud, Cpu, FolderOpen, KeyRound, Save, TriangleAlert } from "lucide-react";
+import { Check, Cloud, Cpu, KeyRound, Save, TriangleAlert } from "lucide-react";
 
 const ROUTES = [
   { id: "planner", label: "Plan model" },
@@ -11,13 +11,11 @@ export function ProviderSettings({ providers, send, snapshot }) {
   const [model, setModel] = useState("");
   const [groupId, setGroupId] = useState("default");
   const [routeDrafts, setRouteDrafts] = useState({});
-  const [workspace, setWorkspace] = useState("");
 
   useEffect(() => {
     if (!snapshot) return;
     setProviderId(snapshot.provider || "");
     setModel(snapshot.model || "");
-    setWorkspace(snapshot.workspace || "");
     const next = {};
     for (const route of snapshot.routes || []) {
       if (route.role === "planner" || route.role === "builder") {
@@ -25,7 +23,7 @@ export function ProviderSettings({ providers, send, snapshot }) {
       }
     }
     setRouteDrafts(next);
-  }, [snapshot?.provider, snapshot?.model, snapshot?.workspace, snapshot?.routes]);
+  }, [snapshot?.provider, snapshot?.model, snapshot?.routes]);
 
   const activeProvider = providers.find((provider) => provider.id === providerId);
   const groups = activeProvider?.modelGroups || [];
@@ -132,24 +130,6 @@ export function ProviderSettings({ providers, send, snapshot }) {
               }}
             />
           ))}
-        </div>
-      </section>
-
-      <section className="workspace-card">
-        <h2>Workspace</h2>
-        <div className="workspace-row">
-          <input value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
-          <button className="secondary-button" type="button" onClick={async () => {
-            const path = await window.crypt?.chooseDirectory?.();
-            if (path) {
-              setWorkspace(path);
-              send({ type: "setWorkspace", path });
-            }
-          }}>
-            <FolderOpen size={15} />
-            Browse
-          </button>
-          <button className="secondary-button" type="button" onClick={() => send({ type: "setWorkspace", path: workspace })}>Save</button>
         </div>
       </section>
     </main>

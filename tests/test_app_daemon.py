@@ -149,6 +149,25 @@ def test_desktop_ollama_cloud_selection_uses_cloud_host():
     assert app_daemon._desktop_ollama_host("qwen2.5-coder:14b", {}) == settings.OLLAMA_HOST
 
 
+def test_app_daemon_applies_ollama_cloud_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
+    events: list[dict] = []
+    daemon = app_daemon.AppDaemon(emit=events.append, cwd=str(tmp_path))
+
+    daemon.handle_command({
+        "type": "setProviderModel",
+        "provider": settings.PROVIDER_OLLAMA,
+        "model": "kimi-k2.6:cloud",
+        "id": "ollama-cloud",
+    })
+
+    saved = settings.load_config()
+    assert saved["provider"] == settings.PROVIDER_OLLAMA
+    assert saved["ollama_model"] == "kimi-k2.6:cloud"
+    assert saved["ollama_host"] == "https://ollama.com"
+    assert events[-1]["snapshot"]["model"] == "kimi-k2.6:cloud"
+
+
 def test_app_daemon_routes_slash_status_to_command_result(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
     events: list[dict] = []
@@ -174,6 +193,17 @@ def test_app_daemon_start_prompt_runs_synchronously(monkeypatch, tmp_path):
     daemon.handle_command({"type": "sendPrompt", "text": "hi", "route": "builder", "id": "sync-1"})
 
     assert calls == [("sync-1", "hi", "builder")]
+
+
+def test_app_daemon_provider_args_follow_thinking_toggle():
+    previous = runtime.show_thinking()
+    try:
+        runtime.set_show_thinking(True)
+        assert app_daemon._args().show_thinking is True
+        runtime.set_show_thinking(False)
+        assert app_daemon._args().show_thinking is False
+    finally:
+        runtime.set_show_thinking(previous)
 
 
 def test_app_daemon_rejects_empty_prompt(monkeypatch, tmp_path):

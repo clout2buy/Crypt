@@ -90,6 +90,39 @@ def test_stream_one_turn_emits_text_deltas_to_event_sink(workspace):
     assert [event["text"] for event in events if event["event"] == "assistantDelta"] == ["hello", " world"]
 
 
+def test_stream_one_turn_emits_thinking_deltas_when_enabled(workspace):
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+
+        def stream_turn(self, messages, tools, system):
+            yield ThinkingDelta("plan")
+            yield TurnEnd(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            )
+
+    events: list[dict] = []
+    provider = Provider()
+    previous = runtime.show_thinking()
+    runtime.configure(provider, str(workspace), session=None)
+    runtime.set_show_thinking(True)
+    try:
+        loop._stream_one_turn(
+            provider,
+            messages=[{"role": "user", "content": "think"}],
+            tools=[],
+            loader=loop._SilentLoader(),
+            render=False,
+            event_sink=events.append,
+        )
+    finally:
+        runtime.set_show_thinking(previous)
+
+    assert [event["text"] for event in events if event["event"] == "thinkingDelta"] == ["plan"]
+
+
 def test_dispatch_tool_uses_emits_live_tool_events(monkeypatch, workspace):
     class Provider:
         is_oauth = False

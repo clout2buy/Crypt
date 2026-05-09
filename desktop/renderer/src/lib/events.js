@@ -20,13 +20,13 @@ export function normalizeEvent(payload = {}) {
     tool: payload.tool || "",
     ok: payload.ok,
     args: payload.args || null,
-    append: rawEvent === "assistantDelta",
+    append: rawEvent === "assistantDelta" || rawEvent === "thinkingDelta",
     done: rawEvent === "taskFinished" || rawEvent === "toolResult"
   };
 }
 
 function mergeEvent(current, next) {
-  if (!next.text && (next.event === "assistant" || next.event === "tool")) {
+  if (!next.text && (next.event === "assistant" || next.event === "tool" || next.event === "thinking")) {
     return current;
   }
 
@@ -50,6 +50,7 @@ function mergeEvent(current, next) {
 function normalizedEventName(payload) {
   const event = payload.event || "system";
   if (event === "assistantDelta" || event === "taskFinished") return "assistant";
+  if (event === "thinkingDelta") return "thinking";
   if (event === "toolCall" || event === "toolStarted" || event === "toolProgress" || event === "toolResult") return "tool";
   if (event === "taskFailed") return "error";
   return event;
@@ -58,6 +59,7 @@ function normalizedEventName(payload) {
 function eventId(payload, event, rawEvent) {
   const taskId = payload.id || "event";
   if (event === "assistant") return `${taskId}-assistant`;
+  if (event === "thinking") return `${taskId}-thinking`;
   if (event === "tool") return `${taskId}-tool-${payload.callId || eventSequence}`;
   if (rawEvent === "snapshot" || rawEvent === "ready") return rawEvent;
   return `${taskId}-${event}-${eventSequence}`;
@@ -67,6 +69,7 @@ function toneFor(payload) {
   const event = payload.event || "";
   if (event === "user") return "user";
   if (event === "assistantDelta" || event === "taskFinished") return "assistant";
+  if (event === "thinkingDelta") return "thinking";
   if (event === "toolCall" || event === "toolStarted" || event === "toolProgress") return "tool";
   if (event === "toolResult") return payload.ok === false ? "error" : "tool";
   if (event.includes("Failed") || event === "error" || event === "daemonError" || event === "daemonExit") return "error";
@@ -76,6 +79,7 @@ function toneFor(payload) {
 function labelFor(payload) {
   if (payload.event === "user") return "You";
   if (payload.event === "assistantDelta" || payload.event === "taskFinished") return "Crypt";
+  if (payload.event === "thinkingDelta") return "Thinking";
   if (payload.event === "toolCall") return payload.tool || "Tool";
   if (payload.event === "toolStarted") return `Running - ${payload.tool || "tool"}`;
   if (payload.event === "toolProgress") return `Reading - ${payload.tool || "tool"}`;

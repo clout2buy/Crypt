@@ -668,7 +668,7 @@ def _stream_one_turn(
     artifact_fast_lane: bool = False,
     event_sink: EventSink | None = None,
 ) -> TurnEnd:
-    show_thinking = runtime.show_thinking() if render else False
+    show_thinking = runtime.show_thinking()
     thinking_open = False
     thinking_started_at: float | None = None
     thinking_chars = 0
@@ -722,6 +722,8 @@ def _stream_one_turn(
                 if thinking_started_at is None:
                     thinking_started_at = event_at
                 thinking_chars += len(event.text or "")
+                if show_thinking:
+                    _emit_event(event_sink, {"event": "thinkingDelta", "text": event.text})
                 if _reasoning_stalled(
                     thinking_started_at,
                     thinking_chars,
@@ -749,7 +751,7 @@ def _stream_one_turn(
                                 event.text,
                                 activity="model planning before next action",
                             )
-                if not show_thinking:
+                if not render or not show_thinking:
                     continue
                 if not thinking_open:
                     ui.thinking_start()

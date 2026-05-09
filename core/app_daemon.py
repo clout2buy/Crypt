@@ -327,7 +327,7 @@ def _args(model: str | None = None) -> SimpleNamespace:
         max_tokens=None,
         thinking_budget=None,
         no_thinking=False,
-        show_thinking=False,
+        show_thinking=runtime.show_thinking(),
         ollama_host=None,
     )
 
