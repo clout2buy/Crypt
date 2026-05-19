@@ -3,7 +3,10 @@ import { Check, Cloud, Cpu, KeyRound, Save, TriangleAlert } from "lucide-react";
 
 const ROUTES = [
   { id: "planner", label: "Plan model" },
-  { id: "builder", label: "Code model" }
+  { id: "builder", label: "Code model" },
+  { id: "reviewer", label: "Review model" },
+  { id: "fast", label: "Quick model" },
+  { id: "fallback", label: "Fallback model" }
 ];
 
 export function ProviderSettings({ providers, send, snapshot }) {
@@ -18,7 +21,7 @@ export function ProviderSettings({ providers, send, snapshot }) {
     setModel(snapshot.model || "");
     const next = {};
     for (const route of snapshot.routes || []) {
-      if (route.role === "planner" || route.role === "builder") {
+      if (ROUTES.some((item) => item.id === route.role)) {
         next[route.role] = { provider: route.provider, model: route.model };
       }
     }

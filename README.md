@@ -10,6 +10,20 @@ the runtime small enough to understand, but includes the pieces a production
 agent needs: typed tools, live terminal state, safe writes, subagents, target
 evals, trace redaction, and installable packaging.
 
+## Repo Role
+
+This repository is the product UI-agent shell: Electron desktop, visual
+surfaces, preview workflows, design tools, packaged app assets, and Agent D style
+product experience.
+
+The sibling `CryptCore` repository is the CLI/core source of truth. Crypt should
+consume CryptCore through `python -m crypt`, `python -m crypt app-daemon`, a
+local development package path, or a future formal app-server protocol. Runtime
+policy, providers, tool behavior, sessions, memory, approvals, and safety should
+land in CryptCore first.
+
+See [Crypt UI-Agent Boundary](docs/CRYPT_UI_AGENT_BOUNDARY.md).
+
 ![Crypt terminal preview](docs/assets/crypt-terminal.svg)
 
 ## ✨ Why Crypt
@@ -44,7 +58,13 @@ Desktop tabs:
 
 - `Chat` keeps the main conversation quiet and fast.
 - `Agents` shows active runs, model routes, tool calls, thinking, and subagent lanes.
-- `Code` pairs the chat stream with a preview browser for localhost apps or HTML files, plus window screenshots.
+- `Code` pairs the chat stream with a preview browser for localhost apps or HTML/SVG files.
+- `Design` adds prompt-to-artifact controls for surface, visual direction, and target frame, then previews the generated files beside the design stream.
+
+Local HTML/SVG previews are served through Electron's `crypt-preview://`
+protocol. The protocol only serves files inside the active workspace or files
+chosen explicitly through the preview picker, so generated pages can load local
+assets without opening arbitrary paths on disk.
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -98,10 +118,10 @@ desktop/             Electron desktop shell and React renderer
 Crypt ships with guardrails that are tested in CI:
 
 - secrets are redacted before transcript, trace, shell-spill, and background-log writes
-- dangerous shell commands require approval even in high-autonomy modes
+- destructive shell commands stay approval-gated even when auto-work runs ordinary shell, web, and file-open tools
 - repeated blind writes are blocked before they turn into tool loops
 - worker subagents can only write inside assigned scopes
-- active HTML/SVG/PDF artifacts are not auto-opened without approval
+- local HTML/SVG previews are scoped through `crypt-preview://` so generated pages can load workspace assets without arbitrary disk access
 - package builds are installed and smoke-tested from a clean temp directory
 
 ## 📚 Docs

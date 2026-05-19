@@ -4,26 +4,40 @@ import {
   Code2,
   GitBranch,
   MessageSquare,
+  Palette,
   Plus,
   Settings2,
   Shield,
   Wrench
 } from "lucide-react";
 
-export function Sidebar({ activeView, connected, onChangeView, onNewSession, recentPrompts = [], snapshot }) {
+export function Sidebar({
+  activeSessionId,
+  activeView,
+  connected,
+  onChangeView,
+  onNewSession,
+  onSelectSession,
+  sessions = [],
+  snapshot
+}) {
   const modes = [
     { id: "chat", label: "Chat", icon: MessageSquare },
     { id: "agents", label: "Agents", icon: GitBranch },
-    { id: "code", label: "Code", icon: Code2 }
+    { id: "code", label: "Code", icon: Code2 },
+    { id: "design", label: "Design", icon: Palette }
   ];
   const nav = [
     { id: "providers", label: "Providers", icon: Cloud }
   ];
 
   return (
-    <aside className="sidebar">
+    <aside className={connected ? "sidebar linked" : "sidebar offline"}>
       <div className="app-brand">
-        <img src="./crypt-logo.svg" alt="" />
+        <div className="brand-glyph">
+          <img src="./crypt-logo.svg" alt="" />
+          <span aria-hidden="true" />
+        </div>
         <div>
           <strong>Crypt</strong>
           <span>{connected ? "Linked" : "Offline"}</span>
@@ -72,15 +86,23 @@ export function Sidebar({ activeView, connected, onChangeView, onNewSession, rec
       </div>
 
       <div className="sidebar-section recents">
-        <span className="section-label">This Session</span>
-        {recentPrompts.length ? (
-          recentPrompts.map((event) => (
-            <div className="recent-item" key={event.id} title={event.text}>
-              {event.text}
-            </div>
+        <span className="section-label">Sessions</span>
+        {sessions.length ? (
+          sessions.map((session) => (
+            <button
+              className={session.id === activeSessionId ? "session-item active" : "session-item"}
+              key={session.id}
+              title={session.name}
+              type="button"
+              onClick={() => onSelectSession(session.id)}
+            >
+              <span>{session.view}</span>
+              <strong>{session.name}</strong>
+              <small>{session.events?.filter((event) => event.event === "user").length || 0}</small>
+            </button>
           ))
         ) : (
-          <span className="empty-sidebar">No prompts yet</span>
+          <span className="empty-sidebar">No sessions yet</span>
         )}
       </div>
 

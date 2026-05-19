@@ -344,7 +344,9 @@ function isPreviewable(fileName) {
 }
 
 function fileUrl(filePath) {
-  return `file:///${encodeURI(filePath.replace(/\\/g, "/")).replace(/#/g, "%23")}`;
+  const normalized = filePath.replace(/\\/g, "/");
+  const pathname = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  return `crypt-preview://local${encodeURI(pathname).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
 }
 
 module.exports = { createPreviewManager };

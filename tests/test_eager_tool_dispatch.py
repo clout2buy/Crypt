@@ -160,6 +160,47 @@ def test_dispatch_tool_uses_emits_live_tool_events(monkeypatch, workspace):
     assert events[1]["text"] == "ran now"
 
 
+def test_dispatch_tool_uses_skips_batch_after_validation_failure(monkeypatch, workspace):
+    class Provider:
+        is_oauth = False
+
+    ran: list[str] = []
+    first = Tool(
+        name="invalid_first",
+        description="stub",
+        schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        permission="auto",
+        run=lambda args: "should not run",
+    )
+    second = Tool(
+        name="second_after_invalid",
+        description="stub",
+        schema={"type": "object", "properties": {}, "required": []},
+        permission="auto",
+        run=lambda args: ran.append("second") or "ran",
+    )
+    monkeypatch.setitem(registry.REGISTRY._tools, first.name, first)
+    monkeypatch.setitem(registry.REGISTRY._tools, second.name, second)
+    runtime.configure(Provider(), str(workspace), session=None)
+    assistant_msg = {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "call_bad", "name": first.name, "input": {"x": 123}},
+            {"type": "tool_use", "id": "call_second", "name": second.name, "input": {}},
+        ],
+    }
+    messages = [assistant_msg]
+
+    loop._dispatch_tool_uses(Provider(), assistant_msg, messages, record=False, render=False)
+
+    assert ran == []
+    results = messages[-1]["content"]
+    assert results[0]["is_error"] is True
+    assert "schema validation failed" in results[0]["content"]
+    assert results[1]["is_error"] is True
+    assert "skipped: previous tool failed" in results[1]["content"]
+
+
 def test_anthropic_block_stop_emits_tool_ready_before_full_message():
     content_blocks = []
     usage = {"input_tokens": 10, "output_tokens": 3}
@@ -300,6 +341,77 @@ def test_multi_tool_assistant_message_uses_parallel_dispatch(monkeypatch):
 
     assert calls == [["call_1", "call_2"]]
     assert [b["tool_use_id"] for b in messages[-1]["content"]] == ["call_1", "call_2"]
+
+
+def test_parallel_dispatch_preserves_approval_handler(monkeypatch):
+    previous = runtime.approval_mode()
+    runtime.set_approval_mode(runtime.APPROVAL_NORMAL)
+    approvals: list[str] = []
+    try:
+        tool = Tool(
+            name="parallel_approval_stub",
+            description="stub",
+            schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+            permission="ask",
+            run=lambda args: f"ok {args['x']}",
+            summary=lambda args: args["x"],
+            parallel_safe=True,
+        )
+        monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+        blocks = [
+            {"type": "tool_use", "id": "call_1", "name": tool.name, "input": {"x": "one"}},
+            {"type": "tool_use", "id": "call_2", "name": tool.name, "input": {"x": "two"}},
+        ]
+
+        def approve(**kwargs):
+            approvals.append(kwargs["summary"])
+            return True, ""
+
+        with runtime.approval_handler(approve):
+            results = loop._dispatch_parallel(blocks, render=False)
+
+        assert [item["is_error"] for item in results] == [False, False]
+        assert [item["content"] for item in results] == ["ok one", "ok two"]
+        assert sorted(approvals) == ["one", "two"]
+    finally:
+        runtime.set_approval_mode(previous)
+
+
+def test_streaming_executor_preserves_approval_handler(monkeypatch):
+    previous = runtime.approval_mode()
+    runtime.set_approval_mode(runtime.APPROVAL_NORMAL)
+    approvals: list[str] = []
+    try:
+        tool = Tool(
+            name="read_file",
+            description="stub",
+            schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            permission="ask",
+            run=lambda args: f"read {args['path']}",
+            classify=lambda args: "ask",
+            summary=lambda args: args["path"],
+        )
+        monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+        executor = loop._StreamingToolExecutor(render=False)
+        block = {"type": "tool_use", "id": "call_stream", "name": "read_file", "input": {"path": "outside.txt"}}
+
+        def approve(**kwargs):
+            approvals.append(kwargs["summary"])
+            return True, ""
+
+        with runtime.approval_handler(approve):
+            executor.add(block)
+            results = executor.finish()
+
+        assert results == [{
+            "type": "tool_result",
+            "tool_use_id": "call_stream",
+            "content": "read outside.txt",
+            "is_error": False,
+        }]
+        assert approvals == ["outside.txt"]
+    finally:
+        runtime.set_approval_mode(previous)
 
 
 def test_streaming_tool_executor_starts_tool_before_message_stop(monkeypatch, workspace):

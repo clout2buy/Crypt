@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 from core import app_daemon, auth, runtime, settings
 from core.api import OllamaProvider
 
@@ -37,6 +40,38 @@ def test_app_daemon_set_approval_emits_snapshot(monkeypatch, tmp_path):
         assert events[-1]["snapshot"]["approval"] == "yolo-all"
     finally:
         runtime.set_approval_mode(previous)
+
+
+def test_app_daemon_approval_request_waits_for_response(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
+    events: list[dict] = []
+    daemon = app_daemon.AppDaemon(emit=events.append, cwd=str(tmp_path))
+    result: list[tuple[bool, str]] = []
+
+    thread = threading.Thread(
+        target=lambda: result.append(
+            daemon._request_approval(
+                task_id="task-1",
+                session_key="chat-1",
+                question="run this?",
+                tool_name="web_search",
+                args={"query": "x"},
+                summary="x",
+            )
+        )
+    )
+    thread.start()
+    deadline = time.time() + 2
+    while time.time() < deadline and not any(event["event"] == "approvalRequested" for event in events):
+        time.sleep(0.01)
+    approval = next(event for event in events if event["event"] == "approvalRequested")
+
+    daemon.handle_command({"type": "approvalResponse", "approvalId": approval["approvalId"], "approved": True})
+    thread.join(timeout=2)
+
+    assert result == [(True, "")]
+    assert approval["tool"] == "web_search"
+    assert events[-1]["event"] == "approvalResolved"
 
 
 def test_app_daemon_sets_provider_and_model(monkeypatch, tmp_path):

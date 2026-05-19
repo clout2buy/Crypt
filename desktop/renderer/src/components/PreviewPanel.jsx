@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -11,10 +11,16 @@ import {
   Play,
   RefreshCcw,
   Server,
+  Smartphone,
   Square,
+  Tablet,
   X
 } from "lucide-react";
 import { previewArtifactsFromEvents } from "../lib/artifacts.js";
+import {
+  displayPreviewTarget,
+  normalizePreviewTarget
+} from "../lib/previewTargets.js";
 
 export function PreviewPanel({
   artifacts: providedArtifacts,
@@ -32,14 +38,25 @@ export function PreviewPanel({
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [iframeKey, setIframeKey] = useState(0);
   const [screenshot, setScreenshot] = useState("");
+  const [viewport, setViewport] = useState("desktop");
   const [autoLoadedId, setAutoLoadedId] = useState("");
   const [autoStartedCwd, setAutoStartedCwd] = useState("");
   const [serverState, setServerState] = useState(null);
+  const stageRef = useRef(null);
+  const currentTarget = historyIndex >= 0 ? history[historyIndex] : null;
   const currentUrl = historyIndex >= 0 ? history[historyIndex]?.url || "" : "";
   const currentLabel = historyIndex >= 0 ? history[historyIndex]?.label || "" : "";
   const canGoBack = historyIndex > 0;
   const canGoForward = historyIndex >= 0 && historyIndex < history.length - 1;
-  const displayUrl = useMemo(() => currentUrl.replace(/^file:\/\/\//, ""), [currentUrl]);
+  const displayUrl = useMemo(() => displayPreviewTarget(currentUrl, currentTarget?.path), [currentTarget?.path, currentUrl]);
+
+  const clearPreview = () => {
+    setDraftUrl("");
+    setHistory([]);
+    setHistoryIndex(-1);
+    setIframeKey((value) => value + 1);
+    setScreenshot("");
+  };
 
   useEffect(() => {
     if (!latestArtifact || latestArtifact.id === autoLoadedId) return;
@@ -113,24 +130,44 @@ export function PreviewPanel({
   };
 
   const capture = async () => {
-    const image = await window.crypt?.captureScreenshot?.();
+    const bounds = stageRef.current?.getBoundingClientRect();
+    const image = await window.crypt?.captureScreenshot?.(bounds ? {
+      x: Math.round(bounds.x),
+      y: Math.round(bounds.y),
+      width: Math.round(bounds.width),
+      height: Math.round(bounds.height)
+    } : null);
     if (image) setScreenshot(image);
+  };
+
+  const dismissArtifact = (artifact) => {
+    const dismissingCurrent =
+      artifact?.id === currentTarget?.id ||
+      artifact?.url === currentTarget?.url ||
+      artifact?.path === currentTarget?.path;
+    onDismissArtifact?.(artifact.id);
+    if (dismissingCurrent) clearPreview();
   };
 
   return (
     <aside className={currentUrl ? "preview-panel active-preview" : "preview-panel"}>
       <header className="preview-header">
         <div>
-          <span><Monitor size={15} /> Preview</span>
+          <div className="preview-title-row">
+            <span className="preview-leds" aria-hidden="true"><i /><i /><i /></span>
+            <span><Monitor size={15} /> Preview</span>
+          </div>
           <strong>{currentLabel || displayUrl || "Waiting for a web artifact"}</strong>
         </div>
         <div className="preview-header-actions">
-          <button className="icon-button" type="button" title="Open externally" disabled={!currentUrl} onClick={() => window.crypt?.openExternal?.(currentUrl)}>
+          <button className="icon-button" type="button" title="Open externally" disabled={!currentUrl} onClick={() => window.crypt?.openExternal?.(currentTarget?.path || currentUrl)}>
             <ExternalLink size={15} />
           </button>
-          <button className="icon-button" type="button" title="Close preview" onClick={onClose}>
-            <X size={16} />
-          </button>
+          {onClose ? (
+            <button className="icon-button" type="button" title="Close preview" onClick={onClose}>
+              <X size={16} />
+            </button>
+          ) : null}
         </div>
       </header>
 
@@ -146,7 +183,7 @@ export function PreviewPanel({
                 <FileCode2 size={14} />
                 <span>{artifact.label}</span>
               </button>
-              <button className="artifact-dismiss" type="button" title={`Dismiss ${artifact.label}`} onClick={() => onDismissArtifact?.(artifact.id)}>
+              <button className="artifact-dismiss" type="button" title={`Dismiss ${artifact.label}`} onClick={() => dismissArtifact(artifact)}>
                 <X size={12} />
               </button>
             </div>
@@ -155,6 +192,7 @@ export function PreviewPanel({
       ) : null}
 
       <ServerConsole
+        hasCurrentUrl={Boolean(currentUrl)}
         serverState={serverState}
         workspace={workspace}
         onInstall={() => window.crypt?.installPreviewDeps?.(workspace)}
@@ -178,6 +216,17 @@ export function PreviewPanel({
         <button className="icon-button" type="button" disabled={!currentUrl} title="Reload" onClick={() => setIframeKey((value) => value + 1)}>
           <RefreshCcw size={15} />
         </button>
+        <div className="viewport-switch" aria-label="Preview frame">
+          <button className={viewport === "desktop" ? "active" : ""} type="button" title="Desktop frame" onClick={() => setViewport("desktop")}>
+            <Monitor size={14} />
+          </button>
+          <button className={viewport === "tablet" ? "active" : ""} type="button" title="Tablet frame" onClick={() => setViewport("tablet")}>
+            <Tablet size={14} />
+          </button>
+          <button className={viewport === "phone" ? "active" : ""} type="button" title="Phone frame" onClick={() => setViewport("phone")}>
+            <Smartphone size={14} />
+          </button>
+        </div>
         <label className="preview-address">
           <Globe2 size={15} />
           <input
@@ -200,7 +249,7 @@ export function PreviewPanel({
         </button>
       </div>
 
-      <div className="preview-stage">
+      <div className={`preview-stage frame-${viewport}`} ref={stageRef}>
         {currentUrl ? (
           <iframe key={`${iframeKey}-${currentUrl}`} src={currentUrl} title="Crypt preview" />
         ) : (
@@ -222,13 +271,13 @@ export function PreviewPanel({
   );
 }
 
-function ServerConsole({ onInstall, onStart, onStop, serverState, workspace }) {
+function ServerConsole({ hasCurrentUrl, onInstall, onStart, onStop, serverState, workspace }) {
   if (!serverState?.available) {
     return (
       <div className="server-console quiet">
         <div className="server-status">
           <Server size={15} />
-          <span>{workspace ? "No launchable app server detected" : "Workspace not ready"}</span>
+          <span>{hasCurrentUrl ? "Static artifact preview" : workspace ? "No launchable app server detected" : "Workspace not ready"}</span>
         </div>
       </div>
     );
@@ -274,46 +323,4 @@ function ServerConsole({ onInstall, onStart, onStop, serverState, workspace }) {
       {logs ? <pre className="server-log">{logs}</pre> : null}
     </div>
   );
-}
-
-function normalizePreviewTarget(raw) {
-  const url = normalizePreviewUrl(raw);
-  if (!url) return null;
-  return {
-    id: url,
-    label: labelFromUrl(url),
-    path: url,
-    url
-  };
-}
-
-function normalizePreviewUrl(raw) {
-  const value = String(raw || "").trim();
-  if (!value) return "";
-  if (/^[a-zA-Z]:[\\/]/.test(value)) {
-    return `file:///${value.replace(/\\/g, "/")}`;
-  }
-  if (value.startsWith("/") || value.startsWith("~")) {
-    return `file://${value}`;
-  }
-  if (/^https?:\/\//i.test(value) || /^file:\/\//i.test(value)) {
-    return value;
-  }
-  if (/^(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(value)) {
-    return `http://${value}`;
-  }
-  return `https://${value}`;
-}
-
-function labelFromUrl(url) {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === "file:") {
-      const parts = decodeURIComponent(parsed.pathname).split("/");
-      return parts[parts.length - 1] || "artifact";
-    }
-    return parsed.host;
-  } catch {
-    return url;
-  }
 }

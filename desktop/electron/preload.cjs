@@ -16,8 +16,8 @@ contextBridge.exposeInMainWorld("crypt", {
   choosePreviewFile() {
     return ipcRenderer.invoke("crypt:choosePreviewFile");
   },
-  captureScreenshot() {
-    return ipcRenderer.invoke("crypt:captureScreenshot");
+  captureScreenshot(bounds) {
+    return ipcRenderer.invoke("crypt:captureScreenshot", bounds || null);
   },
   detectPreviewServer(cwd) {
     return ipcRenderer.invoke("crypt:detectPreviewServer", cwd);

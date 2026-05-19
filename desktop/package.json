@@ -8,18 +8,84 @@
     "app:dev": "vite --host 127.0.0.1",
     "app:build": "vite build",
     "electron:dev": "concurrently -k \"npm:app:dev\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
-    "electron:preview": "npm run app:build && electron ."
+    "electron:preview": "npm run app:build && electron .",
+    "electron:dir": "npm run app:build && electron-builder --dir",
+    "electron:dist": "npm run app:build && electron-builder --win nsis portable",
+    "test:renderer": "vitest run --environment jsdom"
+  },
+  "build": {
+    "appId": "local.crypt.desktop",
+    "productName": "Crypt",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "renderer/dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../crypt",
+        "to": "backend/crypt"
+      },
+      {
+        "from": "../core",
+        "to": "backend/core"
+      },
+      {
+        "from": "../tools",
+        "to": "backend/tools"
+      },
+      {
+        "from": "../benchmarks",
+        "to": "backend/benchmarks"
+      },
+      {
+        "from": "../main.py",
+        "to": "backend/main.py"
+      },
+      {
+        "from": "../pyproject.toml",
+        "to": "backend/pyproject.toml"
+      },
+      {
+        "from": "../requirements.txt",
+        "to": "backend/requirements.txt"
+      }
+    ],
+    "win": {
+      "icon": "electron/assets/crypt.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Crypt"
+    }
   },
   "dependencies": {
+    "lucide-react": "^0.562.0",
     "react": "^19.2.3",
-    "react-dom": "^19.2.3",
-    "lucide-react": "^0.562.0"
+    "react-dom": "^19.2.3"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@vitejs/plugin-react": "^5.1.2",
     "concurrently": "^9.2.1",
     "electron": "^39.2.7",
+    "electron-builder": "^26.8.1",
+    "jsdom": "^29.1.1",
     "vite": "^7.3.1",
+    "vitest": "^4.1.5",
     "wait-on": "^9.0.3"
   }
 }

@@ -1,6 +1,8 @@
-import { RefreshCcw, Sparkles, Terminal } from "lucide-react";
+import { RefreshCcw, Terminal } from "lucide-react";
 import { Composer } from "./Composer.jsx";
+import { CryptGlyph } from "./CryptGlyph.jsx";
 import { EventStream } from "./EventStream.jsx";
+import { MissionHud, RitualBoard } from "./MissionControl.jsx";
 
 export function ChatView({
   activeRoute,
@@ -12,24 +14,35 @@ export function ChatView({
   onRestart,
   onUserMessage,
   running,
+  sessionName,
   send,
   snapshot,
   transcriptRef
 }) {
+  const launchRitual = (text) => {
+    if (!text || running) return;
+    onUserMessage(text);
+    send({ type: "sendPrompt", text, route: lane });
+  };
+
   return (
-    <main className="workspace-shell">
+    <main className="workspace-shell chat-shell">
       <TopBar
-        eyebrow={activeRoute ? `${activeRoute.provider} / ${activeRoute.model}` : "Shared backend"}
+        eyebrow={`${sessionName || "Chat"} - ${activeRoute ? `${activeRoute.provider} / ${activeRoute.model}` : "Shared backend"}`}
         onRestart={onRestart}
         send={send}
         title="Crypt"
       />
 
-      <EventStream
-        empty={<EmptyChat onNewSession={onNewSession} />}
-        events={events}
-        transcriptRef={transcriptRef}
-      />
+      <section className="run-deck-shell">
+        <MissionHud events={events} running={running} snapshot={snapshot} />
+        <EventStream
+          empty={<EmptyChat onLaunchRitual={launchRitual} onNewSession={onNewSession} running={running} />}
+          events={events}
+          send={send}
+          transcriptRef={transcriptRef}
+        />
+      </section>
 
       <Composer
         activeRoute={activeRoute}
@@ -65,12 +78,16 @@ export function TopBar({ eyebrow, onRestart, send, title }) {
   );
 }
 
-function EmptyChat({ onNewSession }) {
+function EmptyChat({ onLaunchRitual, onNewSession, running }) {
   return (
     <div className="empty-chat">
-      <Sparkles size={25} />
-      <h2>What should Crypt work through?</h2>
-      <p>Same terminal engine. Cleaner cockpit.</p>
+      <div className="empty-emblem" aria-hidden="true">
+        <CryptGlyph name="sigil" size={34} />
+        <span />
+      </div>
+      <h2>What are we building?</h2>
+      <p>Pick a starting point or type exactly what you want.</p>
+      <RitualBoard disabled={running} onLaunch={onLaunchRitual} />
       <div className="empty-actions">
         <button className="primary-button" type="button" onClick={onNewSession}>New session</button>
       </div>

@@ -227,6 +227,70 @@ def test_tool_recovery_detects_bash_platform_hint():
     assert "bash" in correction["content"][0]["text"]
 
 
+def test_tool_recovery_stops_repeated_edit_spiral():
+    messages = [{"role": "user", "content": "change the colors"}]
+    for idx, tool_name in enumerate(["edit_file", "multi_edit", "edit_file"], start=1):
+        messages.append({
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": f"call_{idx}", "name": tool_name, "input": {"path": "prototype.html"}}],
+        })
+        messages.append({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": f"call_{idx}",
+                "content": "schema validation failed: edits: expected a non-empty array",
+                "is_error": True,
+            }],
+        })
+
+    assert tool_recovery.should_stop_after_failure_spiral(messages) is True
+    stop = tool_recovery.spiral_stop_message(messages)
+    assert "I stopped before retrying" in stop["content"][0]["text"]
+
+
+def test_loop_stops_after_repeated_recoverable_edit_failures(tmp_path):
+    class Provider:
+        name = "fake"
+        model = "fake-model"
+        is_oauth = False
+        context_window = 100_000
+
+        def __init__(self):
+            self.calls = 0
+
+        def stream_turn(self, messages, tools, system):
+            self.calls += 1
+            if self.calls > 3:
+                raise AssertionError("loop should stop before another blind retry")
+            yield TurnEnd(
+                stop_reason="tool_use",
+                message={
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": f"call_{self.calls}",
+                        "name": "edit_file",
+                        "input": {"path": "prototype.html", "edits": []},
+                    }],
+                },
+            )
+
+    provider = Provider()
+    previous = runtime.approval_mode()
+    runtime.set_approval_mode(runtime.APPROVAL_ALL)
+    try:
+        runtime.configure(provider, str(tmp_path), session=None)
+        messages = [{"role": "user", "content": "change the colors"}]
+
+        loop._run_until_done(provider, messages, 0, 0, render=False)
+    finally:
+        runtime.set_approval_mode(previous)
+
+    assert provider.calls == 3
+    assert "I stopped before retrying" in messages[-1]["content"][0]["text"]
+
+
 def test_loop_retries_after_recoverable_tool_validation_failure(tmp_path):
     class Provider:
         name = "fake"

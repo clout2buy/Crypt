@@ -239,22 +239,39 @@ def dispatch(
         return False, msg
 
     classification = tool.classify(args) if tool.classify else None
+    subagent_needs_prompt = (
+        allowed_tools is not None
+        and tool.permission == "ask"
+        and not _subagent_can_run_ask_tool(tool.name, classification)
+    )
     if rule_decision == "allow":
         # Explicit user pre-approval — skip every prompt below.
         if render:
             ui.info(f"auto-approved by rule: {rule_pattern}")
     elif classification == "danger":
         # Danger always confirms unless explicitly allow-listed above.
-        if not render:
-            return False, "approval required: destructive tool call unavailable in non-interactive subagent"
         reason = _danger_reason(tool, args) or "destructive operation"
-        if render:
+        if not render:
+            approval = runtime.approval_callback()
+            if approval is None:
+                if allowed_tools is not None:
+                    return False, "approval required: destructive tool call unavailable in non-interactive subagent"
+                return False, "approval required: destructive tool call unavailable without an interactive approval prompt"
+            approved, feedback = approval(
+                question=f"DANGER ({reason}) - run anyway?",
+                tool_name=tool.name,
+                args=args,
+                danger=True,
+                reason=reason,
+                summary=summary_text,
+            )
+        else:
             if using_lifecycle:
                 ui.tool_set_state(tool_use_id, "approval", f"awaiting approval ({reason})")
             else:
                 ui.activity(f"waiting for approval: {tool.name}")
             _render_preview(tool, args)
-        approved, feedback = ui.confirm(f"DANGER ({reason}) - run anyway?")
+            approved, feedback = ui.confirm(f"DANGER ({reason}) - run anyway?")
         if not approved:
             msg = "denied by user"
             if feedback:
@@ -264,19 +281,37 @@ def dispatch(
     elif classification == "safe":
         # Read-only / harmless. Skip the prompt regardless of mode.
         pass
-    elif classification == "ask" and runtime.yolo():
+    elif (classification == "ask" or subagent_needs_prompt) and runtime.yolo():
         pass
-    elif classification == "ask" or (tool.permission == "ask" and not runtime.can_auto_approve(tool.name)):
+    elif (
+        classification == "ask"
+        or subagent_needs_prompt
+        or (tool.permission == "ask" and not runtime.can_auto_approve(tool.name))
+    ):
         if not render:
-            if not _subagent_can_run_ask_tool(tool.name, classification):
-                return False, "approval required: interactive tool call unavailable in non-interactive subagent"
-        if render:
+            approval = runtime.approval_callback()
+            if approval is None:
+                if subagent_needs_prompt:
+                    return False, "approval required: interactive tool call unavailable in non-interactive subagent"
+                return False, (
+                    "approval required: interactive approval prompt unavailable in this session; "
+                    "switch Permissions to Auto-work for trusted non-destructive tools or Bypass for full auto-run"
+                )
+            approved, feedback = approval(
+                question="run this?",
+                tool_name=tool.name,
+                args=args,
+                danger=False,
+                reason=None,
+                summary=summary_text,
+            )
+        else:
             if using_lifecycle:
                 ui.tool_set_state(tool_use_id, "approval")
             else:
                 ui.activity(f"waiting for approval: {tool.name}")
             _render_preview(tool, args)
-        approved, feedback = ui.confirm("run this?")
+            approved, feedback = ui.confirm("run this?")
         if not approved:
             msg = "denied by user"
             if feedback:

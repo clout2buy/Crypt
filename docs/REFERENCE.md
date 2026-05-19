@@ -18,7 +18,7 @@ needed to run, fork, and debug Crypt.
 | Mode | Select with | Behavior |
 |---|---|---|
 | Manual | `/safe` or `CRYPT_APPROVAL=normal` | Prompt before shell commands and edits |
-| Auto-work | default or `CRYPT_APPROVAL=edits` | File edits can run; risky shell still asks |
+| Auto-work | default or `CRYPT_APPROVAL=edits` | File edits, ordinary shell/background commands, web search/fetch, and file opens can run; destructive shell still asks |
 | YOLO-all | `/yolo all` or `CRYPT_APPROVAL=all` | Bypass normal prompts; danger checks still apply |
 
 Dangerous commands such as `rm -rf`, `git reset --hard`, `git clean`, and
@@ -29,6 +29,12 @@ Dangerous commands such as `rm -rf`, `git reset --hard`, `git clean`, and
 The Electron app is a client over the same Python Crypt engine used by the
 terminal UI. Electron starts `python -m crypt app-daemon`, sends JSON commands,
 and renders the daemon's structured events.
+
+The Code and Design tabs share the preview subsystem. Local HTML/SVG files are
+loaded through the Electron-owned `crypt-preview://` protocol, which is scoped
+to the active workspace and explicitly selected preview files. Node/Vite apps
+can still be launched through the preview server detector when a `package.json`
+with a `dev`, `start`, `preview`, or `serve` script is present.
 
 | Command | Purpose |
 |---|---|
