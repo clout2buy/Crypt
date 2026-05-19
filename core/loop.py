@@ -1,6 +1,7 @@
 ﻿"""Agent loop: stream, dispatch tools, repeat."""
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import time
@@ -555,6 +556,16 @@ def _run_until_done(
                     event_sink=event_sink,
                 )
             _ensure_tool_result_pairing(messages)
+
+            if not is_subagent and tool_recovery.should_stop_after_failure_spiral(messages):
+                stop_message = tool_recovery.spiral_stop_message(messages)
+                messages.append(stop_message)
+                if runtime.session():
+                    runtime.session().record_message(stop_message)
+                if render:
+                    ui.error("stopped repeated edit/write tool failures before the task spiraled")
+                    loader.stop()
+                return current_tokens, session_tokens
 
             # Micro-compaction: once context is half full, replace stale
             # bodies of re-runnable tool results with a marker. Cheap, no
@@ -1133,7 +1144,14 @@ class _StreamingToolExecutor:
             ui.tool_progress_clear()
             ui.tool_begin(tool_id, str(block.get("name") or "tool"), _tool_summary(block))
             ui.tool_set_state(tool_id, "running")
-        future = self._pool.submit(_dispatch_one, block, render=False, event_sink=self._event_sink)
+        context = contextvars.copy_context()
+        future = self._pool.submit(
+            context.run,
+            _dispatch_one,
+            block,
+            render=False,
+            event_sink=self._event_sink,
+        )
         self._running[tool_id] = _RunningTool(block=block, future=future, parallel_safe=parallel_safe)
 
     def _complete_finished(self, *, wait_for_one: bool) -> None:
@@ -1375,7 +1393,11 @@ def _dispatch_parallel(
         return _tool_result_block(block, ok, output)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(run_one, tool_blocks))
+        futures = [
+            pool.submit(contextvars.copy_context().run, run_one, block)
+            for block in tool_blocks
+        ]
+        results = [future.result() for future in futures]
     if render:
         failures = sum(1 for item in results if item.get("is_error"))
         suffix = f" ({failures} failed)" if failures else ""
@@ -1447,6 +1469,8 @@ def _should_abort_tool_batch(ok: bool, output: str) -> bool:
     return (
         text.startswith("denied by user")
         or text.startswith("PermissionError:")
+        or text.startswith("schema validation failed:")
+        or text.startswith("ValueError: multi_edit aborted")
     )
 
 

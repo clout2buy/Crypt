@@ -153,14 +153,107 @@ def test_subagent_allowlist_is_enforced_at_dispatch(monkeypatch):
     assert "not allowed for this subagent" in output
 
 
-def test_ask_tool_blocked_in_subagent(monkeypatch):
-    """render=False simulates the subagent path. Ask-tools must return a
-    failure with a clear message instead of silently calling input()."""
+def test_ask_tool_without_auto_approval_blocks_when_non_interactive(monkeypatch):
+    """Non-rendered ask-tools must fail cleanly instead of calling input()."""
     tool = _stub_tool(permission="ask")
     monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
     ok, output = registry.dispatch(tool.name, {"x": "hi"}, render=False)
     assert ok is False
     assert "approval required" in output
+
+
+def test_auto_work_runs_common_ask_tools_without_prompt(monkeypatch):
+    previous = runtime.approval_mode()
+    runtime.set_approval_mode(runtime.APPROVAL_EDITS)
+    try:
+        tool = _stub_tool(name="web_search", permission="ask")
+        monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+        ok, output = registry.dispatch(tool.name, {"x": "hi"}, render=False)
+
+        assert ok is True
+        assert "ran" in output
+    finally:
+        runtime.set_approval_mode(previous)
+
+
+def test_auto_work_does_not_expand_subagent_ask_permissions(monkeypatch):
+    previous = runtime.approval_mode()
+    runtime.set_approval_mode(runtime.APPROVAL_EDITS)
+    try:
+        tool = _stub_tool(name="web_search", permission="ask")
+        monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+        with runtime.subagent_context(agent_type="explorer", allowed_tools={"web_search"}, task_id="agent_1"):
+            ok, output = registry.dispatch(tool.name, {"x": "hi"}, render=False)
+
+        assert ok is False
+        assert "interactive tool call unavailable in non-interactive subagent" in output
+    finally:
+        runtime.set_approval_mode(previous)
+
+
+def test_subagent_ask_tool_uses_approval_handler_when_available(monkeypatch):
+    previous = runtime.approval_mode()
+    runtime.set_approval_mode(runtime.APPROVAL_EDITS)
+    calls: list[dict] = []
+    try:
+        tool = _stub_tool(name="web_search", permission="ask")
+        monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+        def approve(**kwargs):
+            calls.append(kwargs)
+            return True, ""
+
+        with runtime.approval_handler(approve):
+            with runtime.subagent_context(agent_type="explorer", allowed_tools={"web_search"}, task_id="agent_1"):
+                ok, output = registry.dispatch(tool.name, {"x": "hi"}, render=False)
+
+        assert ok is True
+        assert "ran" in output
+        assert calls[0]["tool_name"] == "web_search"
+        assert calls[0]["summary"] == "hi"
+    finally:
+        runtime.set_approval_mode(previous)
+
+
+def test_yolo_all_allows_subagent_ask_tools(monkeypatch):
+    previous = runtime.approval_mode()
+    runtime.set_approval_mode(runtime.APPROVAL_ALL)
+    try:
+        tool = _stub_tool(name="web_search", permission="ask")
+        monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+        with runtime.subagent_context(agent_type="explorer", allowed_tools={"web_search"}, task_id="agent_1"):
+            ok, output = registry.dispatch(tool.name, {"x": "hi"}, render=False)
+
+        assert ok is True
+        assert "ran" in output
+    finally:
+        runtime.set_approval_mode(previous)
+
+
+def test_noninteractive_manual_uses_approval_handler(monkeypatch):
+    previous = runtime.approval_mode()
+    runtime.set_approval_mode(runtime.APPROVAL_NORMAL)
+    calls: list[dict] = []
+    try:
+        tool = _stub_tool(permission="ask")
+        monkeypatch.setitem(registry.REGISTRY._tools, tool.name, tool)
+
+        def approve(**kwargs):
+            calls.append(kwargs)
+            return True, ""
+
+        with runtime.approval_handler(approve):
+            ok, output = registry.dispatch(tool.name, {"x": "hi"}, render=False)
+
+        assert ok is True
+        assert "ran" in output
+        assert calls[0]["tool_name"] == "stub"
+        assert calls[0]["summary"] == "hi"
+    finally:
+        runtime.set_approval_mode(previous)
 
 
 def test_classify_safe_skips_prompt(monkeypatch):

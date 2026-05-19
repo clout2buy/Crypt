@@ -8,6 +8,11 @@ from .types import Tool
 
 def run(args: dict) -> str:
     action = str(args.get("action", "status")).strip().lower()
+    if not _inside_work_tree():
+        return (
+            f"Git is not available for this workspace because {root()} is not inside a git repository. "
+            "Switch the workspace to a repo folder or initialize git before asking for status/diff/log."
+        )
 
     if action == "status":
         cmd = ["status", "-sb"]
@@ -67,6 +72,11 @@ def _run_git(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
     except FileNotFoundError as e:
         raise RuntimeError("git is not installed or not on PATH") from e
     return r.returncode, r.stdout or "", r.stderr or ""
+
+
+def _inside_work_tree() -> bool:
+    rc, out, _ = _run_git(["rev-parse", "--is-inside-work-tree"], timeout=10)
+    return rc == 0 and out.strip().lower() == "true"
 
 
 TOOL = Tool(

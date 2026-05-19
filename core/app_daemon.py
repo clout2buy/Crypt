@@ -53,7 +53,11 @@ class AppDaemon:
         self._task_lock = threading.Lock()
         self._active_task: str | None = None
         self._cwd = Path(cwd or settings.resolve_workspace(None, settings.load_config())).resolve()
-        self._session: sessions.Session | None = None
+        self._sessions: dict[str, sessions.Session] = {}
+        self._active_session_key = "default"
+        self._task_session_keys: dict[str, str] = {}
+        self._approval_lock = threading.Lock()
+        self._approval_waiters: dict[str, dict] = {}
 
     def run_forever(self) -> int:
         self.emit("ready", snapshot=self.snapshot())
@@ -81,6 +85,9 @@ class AppDaemon:
             runtime.set_approval_mode(mode)
             self.emit("snapshot", id=cid, snapshot=self.snapshot())
             return
+        if ctype == "approvalResponse":
+            self._resolve_approval(command)
+            return
         if ctype == "setThinking":
             mode = str(command.get("mode") or "").strip().lower()
             if mode:
@@ -96,7 +103,7 @@ class AppDaemon:
                 return
             self._cwd = path
             runtime.set_cwd(str(path))
-            self._session = None
+            self._sessions.clear()
             self.emit("snapshot", id=cid, snapshot=self.snapshot())
             return
         if ctype == "setProviderModel":
@@ -106,7 +113,7 @@ class AppDaemon:
             self._set_route(command, request_id=cid)
             return
         if ctype == "newSession":
-            self._new_session(request_id=cid)
+            self._new_session(request_id=cid, session_key=_session_key(command))
             return
         if ctype == "runCommand":
             self._run_command(str(command.get("command") or ""), request_id=cid)
@@ -117,10 +124,10 @@ class AppDaemon:
                 self.emit("error", id=cid, error="prompt is empty")
                 return
             if text.startswith("/"):
-                self._run_command(text[1:], request_id=cid)
+                self._run_command(text[1:], request_id=cid, session_key=_session_key(command))
                 return
             route_role = str(command.get("route") or "").strip().lower() or None
-            self._start_prompt(text, request_id=cid, route_role=route_role)
+            self._start_prompt(text, request_id=cid, route_role=route_role, session_key=_session_key(command))
             return
         self.emit("error", id=cid, error=f"unknown command: {ctype or '<missing>'}")
 
@@ -144,7 +151,8 @@ class AppDaemon:
             "thinkingMode": runtime.thinking_mode(),
             "reasoningEffort": runtime.reasoning_effort() or "none",
             "tools": len(REGISTRY.schemas()),
-            "sessionId": getattr(self._session, "id", None),
+            "sessionId": getattr(self._sessions.get(self._active_session_key), "id", None),
+            "desktopSessionKey": self._active_session_key,
             "activeTask": self._active_task,
             "providers": _provider_inventory(saved),
             "routes": _routes(saved),
@@ -158,7 +166,14 @@ class AppDaemon:
         with self._write_lock:
             print(json.dumps(event, ensure_ascii=False), flush=True)
 
-    def _start_prompt(self, text: str, *, request_id: str, route_role: str | None = None) -> None:
+    def _start_prompt(
+        self,
+        text: str,
+        *,
+        request_id: str,
+        route_role: str | None = None,
+        session_key: str = "default",
+    ) -> None:
         with self._task_lock:
             if self._active_task:
                 self.emit("error", id=request_id, error=f"task already running: {self._active_task}")
@@ -168,10 +183,14 @@ class AppDaemon:
                 return
             task_id = request_id or uuid.uuid4().hex
             self._active_task = task_id
+            self._active_session_key = session_key
+            self._task_session_keys[task_id] = session_key
         self._run_prompt_task(task_id, text, route_role)
 
     def _run_prompt_task(self, task_id: str, text: str, route_role: str | None) -> None:
-        self.emit("taskStarted", id=task_id, prompt=text, snapshot=self.snapshot())
+        session_key = self._task_session_keys.get(task_id, "default")
+        self._active_session_key = session_key
+        self.emit("taskStarted", id=task_id, prompt=text, routeRole=route_role, sessionKey=session_key, snapshot=self.snapshot())
         try:
             saved = settings.load_config()
             provider_name = settings.provider_default(saved)
@@ -186,41 +205,124 @@ class AppDaemon:
                 if not _credential_is_usable(provider_name, cred):
                     raise RuntimeError(_provider_missing_auth_message(provider_name))
                 provider = _provider(saved, provider_name, cred)
-            self.emit("taskProgress", id=task_id, phase="provider", text=f"{provider.name} / {provider.model}")
-            if self._session is None:
-                self._session = sessions.Session(self._cwd, provider=provider.name, model=provider.model)
-            self.emit("taskProgress", id=task_id, phase="running", text="engine started")
+            self.emit(
+                "taskProgress",
+                id=task_id,
+                phase="provider",
+                routeRole=route_role,
+                sessionKey=session_key,
+                text=f"{provider.name} / {provider.model}",
+            )
+            session_obj = self._sessions.get(session_key)
+            if session_obj is None:
+                session_obj = sessions.Session(self._cwd, provider=provider.name, model=provider.model)
+                self._sessions[session_key] = session_obj
+            self.emit("taskProgress", id=task_id, phase="running", routeRole=route_role, sessionKey=session_key, text="engine started")
 
             def emit_live(payload: dict) -> None:
                 event = str(payload.get("event") or "event")
                 data = {key: value for key, value in payload.items() if key != "event"}
-                self.emit(event, id=task_id, **data)
+                self.emit(event, id=task_id, routeRole=route_role, sessionKey=session_key, **data)
 
-            result = loop.run_prompt(
-                provider,
-                text,
-                cwd=str(self._cwd),
-                session_obj=self._session,
-                approval_mode=runtime.approval_mode(),
-                show_thinking=runtime.show_thinking(),
-                render=False,
-                subagent_provider_factory=lambda agent_type: _provider_for_route(saved, agent_type, fallback=provider),
-                event_sink=emit_live,
-            )
+            def approve_tool(**approval: object) -> tuple[bool, str]:
+                return self._request_approval(
+                    task_id=task_id,
+                    session_key=session_key,
+                    **approval,
+                )
+
+            with runtime.approval_handler(approve_tool):
+                result = loop.run_prompt(
+                    provider,
+                    text,
+                    cwd=str(self._cwd),
+                    session_obj=session_obj,
+                    approval_mode=runtime.approval_mode(),
+                    show_thinking=runtime.show_thinking(),
+                    render=False,
+                    subagent_provider_factory=lambda agent_type: _provider_for_route(saved, agent_type, fallback=provider),
+                    event_sink=emit_live,
+                )
             self.emit(
                 "taskFinished",
                 id=task_id,
                 text=result.final_text,
+                routeRole=route_role,
+                sessionKey=session_key,
                 currentTokens=result.current_tokens,
                 sessionTokens=result.session_tokens,
                 snapshot=self.snapshot(),
             )
         except Exception as exc:
-            self.emit("taskFailed", id=task_id, error=f"{type(exc).__name__}: {exc}", snapshot=self.snapshot())
+            self.emit(
+                "taskFailed",
+                id=task_id,
+                routeRole=route_role,
+                sessionKey=session_key,
+                error=f"{type(exc).__name__}: {exc}",
+                snapshot=self.snapshot(),
+            )
         finally:
             with self._task_lock:
                 self._active_task = None
+                self._task_session_keys.pop(task_id, None)
             self.emit("snapshot", snapshot=self.snapshot())
+
+    def _request_approval(
+        self,
+        *,
+        task_id: str,
+        session_key: str,
+        question: object,
+        tool_name: object,
+        args: object,
+        danger: object = False,
+        reason: object = None,
+        summary: object = "",
+    ) -> tuple[bool, str]:
+        approval_id = f"approval-{uuid.uuid4().hex}"
+        done = threading.Event()
+        record = {"done": done, "approved": False, "feedback": ""}
+        with self._approval_lock:
+            self._approval_waiters[approval_id] = record
+        self.emit(
+            "approvalRequested",
+            id=task_id,
+            approvalId=approval_id,
+            sessionKey=session_key,
+            question=str(question or "run this?"),
+            tool=str(tool_name or ""),
+            args=args if isinstance(args, dict) else None,
+            danger=bool(danger),
+            reason=str(reason or ""),
+            text=str(summary or ""),
+        )
+        done.wait()
+        with self._approval_lock:
+            self._approval_waiters.pop(approval_id, None)
+            approved = bool(record.get("approved"))
+            feedback = str(record.get("feedback") or "")
+        self.emit(
+            "approvalResolved",
+            id=task_id,
+            approvalId=approval_id,
+            sessionKey=session_key,
+            approved=approved,
+            text="approved" if approved else "denied",
+        )
+        return approved, feedback
+
+    def _resolve_approval(self, command: dict) -> None:
+        approval_id = str(command.get("approvalId") or "")
+        with self._approval_lock:
+            record = self._approval_waiters.get(approval_id)
+            if record is None:
+                self.emit("error", id=str(command.get("id") or ""), error=f"unknown approval request: {approval_id}")
+                return
+            record["approved"] = bool(command.get("approved"))
+            record["feedback"] = str(command.get("feedback") or "")
+            done = record["done"]
+        done.set()
 
     def _set_provider_model(self, command: dict, *, request_id: str) -> None:
         if self._active_task:
@@ -235,7 +337,7 @@ class AppDaemon:
             self.emit("error", id=request_id, error="model is empty")
             return
         _save_provider_model(settings.load_config(), provider, model, self._cwd)
-        self._session = None
+        self._sessions.clear()
         self.emit(
             "commandResult",
             id=request_id,
@@ -268,15 +370,16 @@ class AppDaemon:
         self.emit("commandResult", id=request_id, command="setRoute", text=f"{role} route set to {provider} / {model}")
         self.emit("snapshot", id=request_id, snapshot=self.snapshot())
 
-    def _new_session(self, *, request_id: str) -> None:
+    def _new_session(self, *, request_id: str, session_key: str = "default") -> None:
         if self._active_task:
             self.emit("error", id=request_id, error=f"task already running: {self._active_task}")
             return
-        self._session = None
-        self.emit("sessionReset", id=request_id, text="Session cleared")
+        self._active_session_key = session_key
+        self._sessions.pop(session_key, None)
+        self.emit("sessionReset", id=request_id, sessionKey=session_key, text="Session cleared")
         self.emit("snapshot", id=request_id, snapshot=self.snapshot())
 
-    def _run_command(self, command: str, *, request_id: str) -> None:
+    def _run_command(self, command: str, *, request_id: str, session_key: str = "default") -> None:
         parts = command.strip().split()
         name = (parts[0].lower() if parts else "status").lstrip("/")
         args = parts[1:]
@@ -289,7 +392,7 @@ class AppDaemon:
             self.emit("snapshot", id=request_id, snapshot=self.snapshot())
             return
         if name in {"clear", "new", "new-session"}:
-            self._new_session(request_id=request_id)
+            self._new_session(request_id=request_id, session_key=session_key)
             self.emit("commandResult", id=request_id, command=name, text="Session cleared")
             return
         if name in {"yolo", "auto"}:
@@ -349,6 +452,11 @@ def _credential(provider_name: str) -> auth.Credential | None:
     import main as cli
 
     return cli._credential(provider_name)
+
+
+def _session_key(command: dict) -> str:
+    value = str(command.get("sessionKey") or command.get("session") or "default").strip()
+    return value or "default"
 
 
 def _credential_is_usable(provider_name: str, cred: auth.Credential | None) -> bool:
@@ -587,6 +695,7 @@ def _help_text() -> str:
 def _timeline_events(messages: list[dict]) -> list[dict]:
     events: list[dict] = []
     names_by_id: dict[str, str] = {}
+    args_by_id: dict[str, object] = {}
     for message in messages:
         role = message.get("role")
         content = message.get("content")
@@ -597,6 +706,7 @@ def _timeline_events(messages: list[dict]) -> list[dict]:
                 call_id = str(block.get("id") or "")
                 name = str(block.get("name") or "tool")
                 names_by_id[call_id] = name
+                args_by_id[call_id] = block.get("input") or {}
                 events.append(
                     {
                         "event": "toolCall",
@@ -618,6 +728,7 @@ def _timeline_events(messages: list[dict]) -> list[dict]:
                         "event": "toolResult",
                         "tool": tool_name,
                         "callId": call_id,
+                        "args": args_by_id.get(call_id) if isinstance(args_by_id.get(call_id), dict) else None,
                         "ok": not is_error,
                         "text": _tool_result_text(tool_name, block.get("content"), is_error=is_error),
                     }

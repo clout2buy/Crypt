@@ -3,8 +3,9 @@ import { Monitor } from "lucide-react";
 import { Composer } from "./Composer.jsx";
 import { TopBar } from "./ChatView.jsx";
 import { EventStream } from "./EventStream.jsx";
+import { MissionHud } from "./MissionControl.jsx";
 import { PreviewPanel } from "./PreviewPanel.jsx";
-import { hasWebProjectActivity, previewArtifactsFromEvents } from "../lib/artifacts.js";
+import { hasWebProjectActivity, mergePreviewArtifacts, previewArtifactsFromEvents } from "../lib/artifacts.js";
 
 export function CodeView({
   activeRoute,
@@ -15,6 +16,7 @@ export function CodeView({
   onRestart,
   onUserMessage,
   running,
+  sessionName,
   send,
   snapshot,
   transcriptRef
@@ -24,14 +26,14 @@ export function CodeView({
   const [dismissedArtifactIds, setDismissedArtifactIds] = useState([]);
   const eventArtifacts = useMemo(() => previewArtifactsFromEvents(events, workspace), [events, workspace]);
   const artifacts = useMemo(
-    () => mergeArtifacts(eventArtifacts, workspaceArtifacts).filter((item) => !dismissedArtifactIds.includes(item.id)),
+    () => mergePreviewArtifacts(eventArtifacts, workspaceArtifacts).filter((item) => !dismissedArtifactIds.includes(item.id)),
     [dismissedArtifactIds, eventArtifacts, workspaceArtifacts]
   );
   const launchSignal = useMemo(() => hasWebProjectActivity(events), [events]);
   const [previewPinned, setPreviewPinned] = useState(false);
   const [closedPreviewKey, setClosedPreviewKey] = useState("");
   const previewKey = `${artifacts.map((item) => item.id).join("|")}::${launchSignal ? "launch" : ""}`;
-  const previewWanted = previewPinned || artifacts.length > 0 || launchSignal;
+  const previewWanted = previewPinned || artifacts.length > 0;
   const showPreview = previewWanted && previewKey !== closedPreviewKey;
 
   useEffect(() => {
@@ -47,14 +49,14 @@ export function CodeView({
   return (
     <main className="workspace-shell code-shell">
       <TopBar
-        eyebrow={activeRoute ? `${activeRoute.provider} / ${activeRoute.model}` : "Shared backend"}
+        eyebrow={`${sessionName || "Code"} - ${activeRoute ? `${activeRoute.provider} / ${activeRoute.model}` : "Shared backend"}`}
         onRestart={onRestart}
         send={send}
         title="Code"
       />
 
       <section className={showPreview ? "code-workbench has-preview" : "code-workbench"}>
-        <div className="code-chat">
+        <div className="code-chat decked">
           {!showPreview ? (
             <button
               className="preview-peek"
@@ -65,13 +67,15 @@ export function CodeView({
               }}
             >
               <Monitor size={16} />
-              Open preview when you need one
+              {launchSignal ? "Open app runner" : "Open preview when you need one"}
             </button>
           ) : null}
+          <MissionHud compact events={events} running={running} snapshot={snapshot} />
           <EventStream
             compact
             empty={<div className="empty-ops">Start a code task and Crypt will stream edits, tools, and output here.</div>}
             events={events}
+            send={send}
             transcriptRef={transcriptRef}
           />
           <Composer
@@ -89,7 +93,7 @@ export function CodeView({
         {showPreview ? (
           <PreviewPanel
             artifacts={artifacts}
-            autoStart={launchSignal || previewPinned}
+            autoStart={previewPinned}
             events={events}
             onClose={() => {
               setPreviewPinned(false);
@@ -104,16 +108,4 @@ export function CodeView({
       </section>
     </main>
   );
-}
-
-function mergeArtifacts(primary, secondary) {
-  const seen = new Set();
-  const merged = [];
-  for (const item of [...primary, ...secondary]) {
-    const key = String(item.path || item.url || item.id).toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    merged.push(item);
-  }
-  return merged;
 }

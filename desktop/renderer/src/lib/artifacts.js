@@ -1,3 +1,5 @@
+import { previewFileUrl } from "./previewTargets.js";
+
 const PREVIEWABLE_EXTENSIONS = new Set([".html", ".htm", ".svg"]);
 
 export function previewArtifactsFromEvents(events, workspace) {
@@ -37,6 +39,18 @@ export function hasWebProjectActivity(events) {
   });
 }
 
+export function mergePreviewArtifacts(...artifactLists) {
+  const seen = new Set();
+  const merged = [];
+  for (const item of artifactLists.flat()) {
+    const key = String(item?.path || item?.url || item?.id || "").toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
+
 function artifactPathFromEvent(event) {
   if (!event || event.event !== "tool" || event.rawEvent !== "toolResult" || event.ok === false) return "";
   if (!["write_file", "edit_file", "multi_edit", "open_file"].includes(event.tool)) return "";
@@ -54,6 +68,10 @@ function pathFromToolArgs(args) {
     const edit = args.edits.find((item) => item && typeof item.path === "string" && isPreviewable(item.path));
     return edit?.path || "";
   }
+  if (Array.isArray(args.changes)) {
+    const change = args.changes.find((item) => item && typeof item.path === "string" && isPreviewable(item.path));
+    return change?.path || "";
+  }
   if (Array.isArray(args.paths)) {
     return args.paths.find((item) => typeof item === "string" && isPreviewable(item)) || "";
   }
@@ -62,7 +80,9 @@ function pathFromToolArgs(args) {
 
 function pathFromText(text) {
   const value = String(text || "");
-  const match = value.match(/\b(?:created|overwrote|edited|opened)\s+(.+?\.(?:html?|svg))\b/i);
+  const match =
+    value.match(/\b(?:created|overwrote|edited|opened)\s+(.+?\.(?:html?|svg))\b/i) ||
+    value.match(/^---\s+(.+?\.(?:html?|svg))\s+---$/im);
   return match ? match[1].trim().replace(/^["'`]|["'`]$/g, "") : "";
 }
 
@@ -84,9 +104,16 @@ function basename(filePath) {
 }
 
 function fileUrl(filePath) {
-  const normalized = filePath.replace(/\\/g, "/");
-  if (/^file:\/\//i.test(normalized) || /^https?:\/\//i.test(normalized)) return normalized;
-  return `file:///${encodeURI(normalized).replace(/#/g, "%23")}`;
+  const normalized = String(filePath || "").replace(/\\/g, "/");
+  if (/^https?:\/\//i.test(normalized) || /^crypt-preview:\/\//i.test(normalized)) return normalized;
+  if (/^file:\/\//i.test(normalized)) {
+    try {
+      return previewFileUrl(decodeURIComponent(new URL(normalized).pathname));
+    } catch {
+      return normalized;
+    }
+  }
+  return previewFileUrl(normalized);
 }
 
 function stripQuery(filePath) {

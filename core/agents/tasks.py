@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import itertools
 import threading
 import time
@@ -69,7 +70,8 @@ def start_agent_task(
         _TASKS[task.id] = task
     _record(task, "agent_task_created", f"{task.agent_type}: {task.name}")
     if background:
-        task.future = _POOL.submit(_execute, task, definition, runner)
+        context = contextvars.copy_context()
+        task.future = _POOL.submit(context.run, _execute, task, definition, runner)
     else:
         _execute(task, definition, runner)
     return task

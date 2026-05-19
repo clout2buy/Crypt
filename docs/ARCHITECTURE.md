@@ -1,5 +1,11 @@
 # Architecture
 
+Repo role: Crypt is the product UI-agent shell. CryptCore is the CLI/core source
+of truth for runtime policy, provider routing, tools, sessions, memory,
+approvals, and verification. This repository may contain a transitional Python
+core copy, but the target architecture is for the desktop/UI product to consume
+CryptCore through the CLI, daemon, package, or formal protocol boundary.
+
 Crypt is intentionally flat: the CLI starts the runtime, `core/` owns durable
 behavior, and `tools/` exposes narrow model-visible actions.
 

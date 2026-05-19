@@ -21,6 +21,7 @@ _thinking_mode = os.getenv("CRYPT_THINKING_MODE", "fast").strip().lower()
 _render_tools = contextvars.ContextVar("crypt_render_tools", default=True)
 _cwd_context = contextvars.ContextVar("crypt_cwd", default=None)
 _subagent_tools = contextvars.ContextVar("crypt_subagent_tools", default=None)
+_approval_callback = contextvars.ContextVar("crypt_approval_callback", default=None)
 _write_scope = contextvars.ContextVar("crypt_write_scope", default=None)
 _agent_type = contextvars.ContextVar("crypt_agent_type", default=None)
 _agent_task_id = contextvars.ContextVar("crypt_agent_task_id", default=None)
@@ -42,6 +43,13 @@ AUTO_EDIT_TOOLS = {
     "edit_file",
     "multi_edit",
     "write_file",
+}
+AUTO_WORK_TOOLS = AUTO_EDIT_TOOLS | {
+    "bash",
+    "bash_start",
+    "open_file",
+    "web_fetch",
+    "web_search",
 }
 
 
@@ -148,12 +156,25 @@ def can_auto_approve(tool_name: str) -> bool:
     if _approval_mode == APPROVAL_ALL:
         return True
     if _approval_mode == APPROVAL_EDITS:
-        return tool_name in AUTO_EDIT_TOOLS
+        return tool_name in AUTO_WORK_TOOLS
     return False
 
 
 def can_auto_approve_plan() -> bool:
     return _approval_mode == APPROVAL_ALL
+
+
+def approval_callback():
+    return _approval_callback.get()
+
+
+@contextmanager
+def approval_handler(callback):
+    token = _approval_callback.set(callback)
+    try:
+        yield
+    finally:
+        _approval_callback.reset(token)
 
 
 def show_thinking() -> bool:

@@ -10,6 +10,8 @@ from .types import Tool
 
 def run(args: dict) -> str:
     path = resolve(args["path"])
+    content = str(args["content"])
+    _assert_complete_preview_artifact(path, content)
     overwrite = bool(args.get("overwrite"))
     existed = path.exists()
     if existed and not overwrite:
@@ -19,10 +21,25 @@ def run(args: dict) -> str:
     if existed:
         file_state.assert_fresh_for_edit(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(args["content"], encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
     file_state.record_write(path)
     artifact_lifecycle.record_write(path)
     return f"{'overwrote' if existed else 'created'} {rel(path)}"
+
+
+def _assert_complete_preview_artifact(path, content: str) -> None:
+    suffix = path.suffix.lower()
+    lowered = content.lower()
+    if suffix in {".html", ".htm"} and "<html" in lowered and "</html>" not in lowered:
+        raise ValueError(
+            "incomplete HTML artifact: content opens an <html> document but is missing </html>. "
+            "Retry with the complete file content or split the implementation into smaller complete files."
+        )
+    if suffix == ".svg" and "<svg" in lowered and "</svg>" not in lowered:
+        raise ValueError(
+            "incomplete SVG artifact: content opens an <svg> document but is missing </svg>. "
+            "Retry with the complete file content."
+        )
 
 
 def summary(args: dict) -> str:
